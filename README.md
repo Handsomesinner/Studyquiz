@@ -33,7 +33,7 @@ evaluation chapter to compare grounded vs ungrounded question quality.
   `app/retriever.py` so the mathematics can be presented in the report. The
   class exposes the same interface an embedding + vector-database retriever
   (e.g. ChromaDB) would, so that upgrade is a drop-in replacement.
-- **Generation** — Claude (`claude-opus-4-8`) receives the retrieved chunks
+- **Generation** — Claude (`claude-haiku-4-5`) receives the retrieved chunks
   and returns questions as **structured output** validated against a Pydantic
   schema — guaranteed parseable JSON, each question carrying a supporting
   quote from the source material.

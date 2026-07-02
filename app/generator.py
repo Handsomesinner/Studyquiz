@@ -15,7 +15,7 @@ import os
 import anthropic
 from pydantic import BaseModel
 
-MODEL = "claude-opus-4-8"
+MODEL = "claude-haiku-4-5"
 
 
 class QuizQuestion(BaseModel):
