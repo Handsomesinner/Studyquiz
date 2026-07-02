@@ -44,13 +44,17 @@ async def upload_document(file: UploadFile):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception:
-        raise HTTPException(400, "Could not read this file. Is it a valid PDF?")
+        raise HTTPException(
+            400,
+            "Could not read this file. Make sure it is a valid, non-corrupted "
+            "document (PDF, Word, PowerPoint, or a text-based file).",
+        )
 
     chunks = pdf_processor.chunk_text(text)
     if len(chunks) == 0:
         raise HTTPException(
             400,
-            "No text could be extracted. Scanned/image-only PDFs are not "
+            "No text could be extracted. Scanned/image-only documents are not "
             "supported (OCR is outside the project scope).",
         )
 

@@ -49,8 +49,9 @@ export ANTHROPIC_API_KEY=sk-ant-...   # get one at https://platform.claude.com/
 uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000 — upload a lecture PDF (or .txt/.md), choose the
-number of questions and an optional focus topic, and take the quiz.
+Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
+or any text-based file), choose the number of questions and an optional focus
+topic, and take the quiz.
 
 ## Evaluation mode (for the project write-up)
 
@@ -61,7 +62,7 @@ and have raters score each question for *relevance*, *correctness*, and
 
 ## Scope / limitations (as stated in the proposal)
 
-- English, text-based PDFs only — scanned/handwritten documents (OCR) are out of scope.
+- Text-based documents (PDF, Word, PowerPoint, plain text) — scanned/handwritten documents (OCR) are out of scope.
 - Multiple-choice questions only; essay grading is out of scope.
 - In-memory storage (single-user demo); a database is listed as future work.
 
