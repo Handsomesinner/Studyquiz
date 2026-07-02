@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>StudyQuiz — AI Study Assistant</title>
+<style>
+  :root {
+    --ink: #1e2430; --muted: #6b7280; --paper: #f6f4ee; --card: #ffffff;
+    --accent: #0d6e5f; --accent-soft: #e2f0ed; --wrong: #b3423a; --wrong-soft: #f9e8e6;
+    --line: #e3ded3;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: Georgia, "Times New Roman", serif; background: var(--paper); color: var(--ink); line-height: 1.55; }
+  header { padding: 2.2rem 1rem 1.2rem; text-align: center; }
+  header h1 { font-size: 1.9rem; letter-spacing: -0.5px; }
+  header h1 span { color: var(--accent); font-style: italic; }
+  header p { color: var(--muted); font-size: 0.95rem; margin-top: 0.3rem; }
+  main { max-width: 720px; margin: 0 auto; padding: 0 1rem 4rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1.4rem; margin-top: 1.2rem; }
+  .card h2 { font-size: 1.05rem; margin-bottom: 0.8rem; }
+  .step { display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 0.75rem; padding: 0.1rem 0.65rem; font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 0.5rem; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); font-family: system-ui, sans-serif; margin: 0.7rem 0 0.25rem; }
+  input[type="text"], input[type="number"], select { width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: 6px; font-size: 0.95rem; font-family: inherit; background: #fff; }
+  input[type="file"] { font-family: system-ui, sans-serif; font-size: 0.9rem; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 0.6rem 1.3rem; font-size: 0.95rem; font-family: system-ui, sans-serif; cursor: pointer; margin-top: 1rem; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .toggle { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.9rem; font-family: system-ui, sans-serif; font-size: 0.85rem; color: var(--muted); }
+  .status { font-family: system-ui, sans-serif; font-size: 0.85rem; margin-top: 0.8rem; color: var(--muted); }
+  .status.error { color: var(--wrong); }
+  .question { border-top: 1px solid var(--line); padding: 1.1rem 0; }
+  .question:first-of-type { border-top: 0; }
+  .question p.q { font-weight: bold; margin-bottom: 0.6rem; }
+  .option { display: block; padding: 0.45rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.4rem; cursor: pointer; font-size: 0.95rem; }
+  .option:hover { border-color: var(--accent); }
+  .option input { margin-right: 0.5rem; }
+  .option.correct { background: var(--accent-soft); border-color: var(--accent); }
+  .option.wrong { background: var(--wrong-soft); border-color: var(--wrong); }
+  .explain { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; padding-left: 0.7rem; border-left: 3px solid var(--line); }
+  .explain q { font-style: italic; }
+  .scoreband { text-align: center; padding: 1rem; font-size: 1.3rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Study<span>Quiz</span></h1>
+  <p>Retrieval-augmented quiz generation from your own lecture materials</p>
+</header>
+<main>
+
+  <section class="card" id="upload-card">
+    <span class="step">Step 1</span>
+    <h2>Upload lecture material</h2>
+    <input type="file" id="file" accept=".pdf,.txt,.md" />
+    <button id="upload-btn">Upload</button>
+    <div class="status" id="upload-status"></div>
+  </section>
+
+  <section class="card hidden" id="options-card">
+    <span class="step">Step 2</span>
+    <h2>Generate a quiz</h2>
+    <div class="row">
+      <div>
+        <label for="num">Number of questions</label>
+        <input type="number" id="num" min="1" max="15" value="5" />
+      </div>
+      <div>
+        <label for="topic">Focus topic (optional)</label>
+        <input type="text" id="topic" placeholder="e.g. process scheduling" />
+      </div>
+    </div>
+    <div class="toggle">
+      <input type="checkbox" id="use-rag" checked />
+      <label for="use-rag" style="margin:0">Ground questions in the document (RAG) — untick for the plain-LLM baseline</label>
+    </div>
+    <button id="generate-btn">Generate quiz</button>
+    <div class="status" id="generate-status"></div>
+  </section>
+
+  <section class="card hidden" id="quiz-card">
+    <span class="step">Step 3</span>
+    <h2>Take the quiz</h2>
+    <div id="questions"></div>
+    <button id="submit-btn">Submit answers</button>
+  </section>
+
+  <section class="card hidden" id="result-card">
+    <div class="scoreband" id="scoreband"></div>
+    <button class="secondary" id="again-btn">Generate another quiz</button>
+  </section>
+
+</main>
+<script>
+let docId = null, quizId = null, questionCount = 0;
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+  return body;
+}
+
+$("upload-btn").onclick = async () => {
+  const file = $("file").files[0];
+  const status = $("upload-status");
+  if (!file) { status.textContent = "Choose a file first."; status.className = "status error"; return; }
+  $("upload-btn").disabled = true;
+  status.className = "status"; status.textContent = "Uploading and indexing…";
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const doc = await api("/api/documents", { method: "POST", body: form });
+    docId = doc.id;
+    status.textContent = `Indexed "${doc.title}" — ${doc.num_words.toLocaleString()} words in ${doc.num_chunks} chunks.`;
+    $("options-card").classList.remove("hidden");
+  } catch (e) {
+    status.textContent = e.message; status.className = "status error";
+  } finally { $("upload-btn").disabled = false; }
+};
+
+$("generate-btn").onclick = async () => {
+  const status = $("generate-status");
+  $("generate-btn").disabled = true;
+  status.className = "status"; status.textContent = "Generating questions with Claude — this takes a few seconds…";
+  try {
+    const quiz = await api("/api/quiz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        document_id: docId,
+        num_questions: parseInt($("num").value, 10) || 5,
+        topic: $("topic").value.trim() || null,
+        use_rag: $("use-rag").checked,
+      }),
+    });
+    quizId = quiz.quiz_id;
+    questionCount = quiz.questions.length;
+    renderQuiz(quiz.questions);
+    status.textContent = "";
+    $("result-card").classList.add("hidden");
+    $("quiz-card").classList.remove("hidden");
+    $("quiz-card").scrollIntoView({ behavior: "smooth" });
+  } catch (e) {
+    status.textContent = e.message; status.className = "status error";
+  } finally { $("generate-btn").disabled = false; }
+};
+
+function renderQuiz(questions) {
+  const holder = $("questions");
+  holder.innerHTML = "";
+  questions.forEach((q, qi) => {
+    const div = document.createElement("div");
+    div.className = "question";
+    div.dataset.index = qi;
+    const p = document.createElement("p");
+    p.className = "q";
+    p.textContent = `${qi + 1}. ${q.question}`;
+    div.appendChild(p);
+    q.options.forEach((opt, oi) => {
+      const label = document.createElement("label");
+      label.className = "option";
+      label.dataset.option = oi;
+      const radio = document.createElement("input");
+      radio.type = "radio"; radio.name = `q${qi}`; radio.value = oi;
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(opt));
+      div.appendChild(label);
+    });
+    holder.appendChild(div);
+  });
+  $("submit-btn").classList.remove("hidden");
+}
+
+$("submit-btn").onclick = async () => {
+  const answers = [];
+  for (let i = 0; i < questionCount; i++) {
+    const chosen = document.querySelector(`input[name="q${i}"]:checked`);
+    answers.push(chosen ? parseInt(chosen.value, 10) : -1);
+  }
+  $("submit-btn").disabled = true;
+  try {
+    const result = await api(`/api/quiz/${quizId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    });
+    showResults(result);
+  } catch (e) { alert(e.message); }
+  finally { $("submit-btn").disabled = false; }
+};
+
+function showResults(result) {
+  result.results.forEach((r, qi) => {
+    const qDiv = document.querySelector(`.question[data-index="${qi}"]`);
+    qDiv.querySelectorAll(".option").forEach((label) => {
+      const oi = parseInt(label.dataset.option, 10);
+      label.querySelector("input").disabled = true;
+      if (oi === r.correct_index) label.classList.add("correct");
+      else if (oi === r.chosen_index && !r.correct) label.classList.add("wrong");
+    });
+    const explain = document.createElement("div");
+    explain.className = "explain";
+    explain.textContent = r.explanation;
+    if (r.source_quote) {
+      const q = document.createElement("q");
+      q.textContent = ` "${r.source_quote}"`;
+      explain.appendChild(document.createElement("br"));
+      explain.appendChild(document.createTextNode("From the material: "));
+      explain.appendChild(q);
+    }
+    qDiv.appendChild(explain);
+  });
+  $("submit-btn").classList.add("hidden");
+  $("scoreband").textContent = `You scored ${result.score} / ${result.total}`;
+  $("result-card").classList.remove("hidden");
+  $("result-card").scrollIntoView({ behavior: "smooth" });
+}
+
+$("again-btn").onclick = () => {
+  $("quiz-card").classList.add("hidden");
+  $("result-card").classList.add("hidden");
+  $("options-card").scrollIntoView({ behavior: "smooth" });
+};
+</script>
+</body>
+</html>
