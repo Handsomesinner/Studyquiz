@@ -22,22 +22,47 @@
   .step { display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 0.75rem; padding: 0.1rem 0.65rem; font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 0.5rem; }
   label { display: block; font-size: 0.85rem; color: var(--muted); font-family: system-ui, sans-serif; margin: 0.7rem 0 0.25rem; }
   input[type="text"], input[type="number"], select { width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: 6px; font-size: 0.95rem; font-family: inherit; background: #fff; }
-  input[type="file"] { font-family: system-ui, sans-serif; font-size: 0.9rem; }
+  input[type="file"] { font-family: system-ui, sans-serif; font-size: 0.9rem; max-width: 100%; }
   .row { display: flex; gap: 1rem; flex-wrap: wrap; }
   .row > div { flex: 1; min-width: 140px; }
   button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 0.6rem 1.3rem; font-size: 0.95rem; font-family: system-ui, sans-serif; cursor: pointer; margin-top: 1rem; }
   button:disabled { opacity: 0.5; cursor: wait; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  a.button-link { display: inline-block; background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 0.55rem 1.1rem; font-size: 0.9rem; font-family: system-ui, sans-serif; text-decoration: none; margin-top: 0.75rem; margin-right: 0.5rem; }
+  a.button-link { display: inline-block; background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 0.55rem 1.1rem; font-size: 0.9rem; font-family: system-ui, sans-serif; text-decoration: none; margin-top: 0.75rem; margin-right: 0.5rem; cursor: pointer; }
   .toggle { display: flex; align-items: flex-start; gap: 0.5rem; margin-top: 0.9rem; font-family: system-ui, sans-serif; font-size: 0.85rem; color: var(--muted); }
   .toggle label { margin: 0; color: var(--muted); }
   .status { font-family: system-ui, sans-serif; font-size: 0.85rem; margin-top: 0.8rem; color: var(--muted); }
   .status.error { color: var(--wrong); }
   .metrics { font-family: system-ui, sans-serif; font-size: 0.85rem; background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 0.75rem 0.9rem; margin-top: 0.9rem; line-height: 1.45; }
   .metrics strong { color: var(--ink); }
+  .metrics code { font-size: 0.8rem; background: rgba(0,0,0,0.05); padding: 0.05rem 0.3rem; border-radius: 4px; }
+
+  .quiz-toolbar {
+    display: flex; flex-wrap: wrap; gap: 0.75rem 1.2rem; align-items: center;
+    justify-content: space-between; margin-bottom: 1rem;
+    font-family: system-ui, sans-serif; font-size: 0.88rem; color: var(--muted);
+  }
+  .progress-wrap { flex: 1; min-width: 160px; }
+  .progress-label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; }
+  .progress-bar {
+    height: 8px; background: var(--line); border-radius: 999px; overflow: hidden;
+  }
+  .progress-bar > span {
+    display: block; height: 100%; width: 0%; background: var(--accent);
+    transition: width 0.2s ease;
+  }
+  .timer {
+    font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink);
+    background: var(--accent-soft); padding: 0.35rem 0.7rem; border-radius: 999px;
+  }
+  .timer.warn { background: var(--warn-soft); color: var(--warn); }
+  .timer.danger { background: var(--wrong-soft); color: var(--wrong); }
+
   .question { border-top: 1px solid var(--line); padding: 1.1rem 0; }
   .question:first-of-type { border-top: 0; }
+  .question.unanswered-highlight { outline: 2px solid var(--warn); outline-offset: 4px; border-radius: 6px; }
   .question p.q { font-weight: bold; margin-bottom: 0.6rem; }
+  .q-meta { font-family: system-ui, sans-serif; font-size: 0.75rem; color: var(--muted); font-weight: 600; margin-bottom: 0.35rem; }
   .option { display: block; padding: 0.45rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.4rem; cursor: pointer; font-size: 0.95rem; }
   .option:hover { border-color: var(--accent); }
   .option input { margin-right: 0.5rem; }
@@ -51,7 +76,16 @@
   .badge.base { background: var(--warn-soft); color: var(--warn); }
   .scoreband { text-align: center; padding: 1rem; font-size: 1.3rem; }
   .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
-  .hidden { display: none; }
+  .hidden { display: none !important; }
+
+  @media print {
+    body { background: #fff; }
+    header p, .step, #upload-card, #options-card, .no-print,
+    #submit-btn, #again-btn, a.button-link, button { display: none !important; }
+    .card { border: none; padding: 0; margin: 0; }
+    .question { break-inside: avoid; page-break-inside: avoid; }
+    .timer, .progress-wrap { display: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -89,6 +123,27 @@
         <input type="text" id="topic" placeholder="e.g. process scheduling" />
       </div>
     </div>
+    <div class="row">
+      <div>
+        <label for="difficulty">Difficulty</label>
+        <select id="difficulty">
+          <option value="easy">Easy — recall & definitions</option>
+          <option value="medium" selected>Medium — mix of recall & application</option>
+          <option value="hard">Hard — reasoning & subtle distinctions</option>
+        </select>
+      </div>
+      <div>
+        <label for="timer-mins">Exam timer (optional)</label>
+        <select id="timer-mins">
+          <option value="0" selected>Off</option>
+          <option value="5">5 minutes</option>
+          <option value="10">10 minutes</option>
+          <option value="15">15 minutes</option>
+          <option value="20">20 minutes</option>
+          <option value="30">30 minutes</option>
+        </select>
+      </div>
+    </div>
     <div class="toggle">
       <input type="checkbox" id="use-rag" checked />
       <label for="use-rag">Ground questions in the document (RAG) — untick for the plain-LLM baseline</label>
@@ -104,16 +159,34 @@
 
   <section class="card hidden" id="quiz-card">
     <span class="step">Step 3</span>
-    <h2>Take the quiz</h2>
+    <h2 id="quiz-title">Take the quiz</h2>
+    <div class="quiz-toolbar no-print">
+      <div class="progress-wrap">
+        <div class="progress-label">
+          <span id="progress-text">Answered 0 of 0</span>
+          <span id="current-q-hint"></span>
+        </div>
+        <div class="progress-bar" aria-hidden="true"><span id="progress-fill"></span></div>
+      </div>
+      <div id="timer-display" class="timer hidden" aria-live="polite">—</div>
+    </div>
     <div id="questions"></div>
-    <button id="submit-btn">Submit answers</button>
+    <div class="status error hidden" id="submit-warning"></div>
+    <div class="actions no-print">
+      <button id="submit-btn">Submit answers</button>
+      <button class="secondary" id="print-quiz-btn" type="button">Print / save PDF</button>
+    </div>
   </section>
 
   <section class="card hidden" id="result-card">
     <div class="scoreband" id="scoreband"></div>
     <div class="metrics hidden" id="result-grounding"></div>
-    <div class="actions">
+    <div class="actions no-print">
       <button class="secondary" id="again-btn">Generate another quiz</button>
+      <button class="secondary" id="review-wrong-btn" type="button">Review wrong only</button>
+      <button class="secondary" id="review-all-btn" type="button">Show all</button>
+      <button class="secondary" id="print-results-btn" type="button">Print results</button>
+      <button class="secondary" id="copy-summary-btn" type="button">Copy score summary</button>
       <a class="button-link" id="export-csv" href="/api/evaluation/export">Download evaluation CSV</a>
       <a class="button-link" id="eval-json" href="#" target="_blank">View quiz evaluation JSON</a>
     </div>
@@ -122,6 +195,11 @@
 </main>
 <script>
 let docId = null, quizId = null, questionCount = 0;
+let lastResult = null;
+let quizMeta = { difficulty: "medium" };
+let timerInterval = null;
+let timerEndsAt = null;
+let reviewWrongOnly = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -156,9 +234,7 @@ async function refreshDocumentList(selectId) {
     });
     if (prev) sel.value = prev;
     $("previous-docs").classList.toggle("hidden", docs.length === 0);
-  } catch (_) {
-    /* ignore list errors on first paint */
-  }
+  } catch (_) { /* ignore */ }
 }
 
 function selectDocument(id, title, detail) {
@@ -207,6 +283,60 @@ function renderGroundingMetrics(g, el, retrieval) {
   el.classList.remove("hidden");
 }
 
+function countAnswered() {
+  let n = 0;
+  for (let i = 0; i < questionCount; i++) {
+    if (document.querySelector(`input[name="q${i}"]:checked`)) n++;
+  }
+  return n;
+}
+
+function updateProgress() {
+  const answered = countAnswered();
+  const total = questionCount;
+  $("progress-text").textContent = `Answered ${answered} of ${total}`;
+  $("progress-fill").style.width = total ? `${(answered / total) * 100}%` : "0%";
+  $("current-q-hint").textContent = total ? `${answered === total ? "Ready to submit" : `${total - answered} left`}` : "";
+}
+
+function stopTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+  timerEndsAt = null;
+}
+
+function formatTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function startTimer(minutes) {
+  stopTimer();
+  const display = $("timer-display");
+  if (!minutes || minutes <= 0) {
+    display.classList.add("hidden");
+    return;
+  }
+  timerEndsAt = Date.now() + minutes * 60 * 1000;
+  display.classList.remove("hidden", "warn", "danger");
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((timerEndsAt - Date.now()) / 1000));
+    display.textContent = `Time left ${formatTime(left)}`;
+    display.classList.toggle("warn", left <= 60 && left > 30);
+    display.classList.toggle("danger", left <= 30);
+    if (left <= 0) {
+      stopTimer();
+      display.textContent = "Time’s up — submitting…";
+      submitQuiz({ force: true, auto: true });
+    }
+  };
+  tick();
+  timerInterval = setInterval(tick, 250);
+}
+
 $("use-rag").onchange = () => {
   const rag = $("use-rag").checked;
   $("require-grounding").disabled = !rag;
@@ -252,6 +382,7 @@ $("generate-btn").onclick = async () => {
   $("generate-btn").disabled = true;
   status.className = "status"; status.textContent = "Generating questions with Claude — this takes a few seconds…";
   $("grounding-metrics").classList.add("hidden");
+  stopTimer();
   try {
     const quiz = await api("/api/quiz", {
       method: "POST",
@@ -262,16 +393,26 @@ $("generate-btn").onclick = async () => {
         topic: $("topic").value.trim() || null,
         use_rag: $("use-rag").checked,
         require_grounding: $("use-rag").checked && $("require-grounding").checked,
+        difficulty: $("difficulty").value || "medium",
       }),
     });
     quizId = quiz.quiz_id;
     questionCount = quiz.questions.length;
+    quizMeta.difficulty = quiz.difficulty || $("difficulty").value;
+    lastResult = null;
+    reviewWrongOnly = false;
     renderQuiz(quiz.questions);
     renderGroundingMetrics(quiz.grounding, $("grounding-metrics"), quiz.retrieval);
     status.textContent = "";
     $("result-card").classList.add("hidden");
     $("quiz-card").classList.remove("hidden");
+    $("submit-btn").classList.remove("hidden");
+    $("submit-btn").disabled = false;
+    $("submit-warning").classList.add("hidden");
+    $("quiz-title").textContent = `Take the quiz (${quizMeta.difficulty})`;
     $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
+    const mins = parseInt($("timer-mins").value, 10) || 0;
+    startTimer(mins);
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
@@ -285,9 +426,13 @@ function renderQuiz(questions) {
     const div = document.createElement("div");
     div.className = "question";
     div.dataset.index = qi;
+    const meta = document.createElement("div");
+    meta.className = "q-meta";
+    meta.textContent = `Question ${qi + 1} of ${questions.length}`;
+    div.appendChild(meta);
     const p = document.createElement("p");
     p.className = "q";
-    p.textContent = `${qi + 1}. ${q.question}`;
+    p.textContent = q.question;
     div.appendChild(p);
     q.options.forEach((opt, oi) => {
       const label = document.createElement("label");
@@ -295,45 +440,87 @@ function renderQuiz(questions) {
       label.dataset.option = oi;
       const radio = document.createElement("input");
       radio.type = "radio"; radio.name = `q${qi}`; radio.value = oi;
+      radio.addEventListener("change", () => {
+        div.classList.remove("unanswered-highlight");
+        updateProgress();
+      });
       label.appendChild(radio);
       label.appendChild(document.createTextNode(opt));
       div.appendChild(label);
     });
     holder.appendChild(div);
   });
-  $("submit-btn").classList.remove("hidden");
+  updateProgress();
 }
 
-$("submit-btn").onclick = async () => {
+function collectAnswers() {
   const answers = [];
   for (let i = 0; i < questionCount; i++) {
     const chosen = document.querySelector(`input[name="q${i}"]:checked`);
     answers.push(chosen ? parseInt(chosen.value, 10) : -1);
   }
+  return answers;
+}
+
+async function submitQuiz({ force = false, auto = false } = {}) {
+  const answers = collectAnswers();
+  const unanswered = answers.filter((a) => a < 0).length;
+  const warn = $("submit-warning");
+
+  if (!force && unanswered > 0) {
+    warn.textContent = `You have ${unanswered} unanswered question${unanswered === 1 ? "" : "s"}. Submit anyway, or scroll up to finish.`;
+    warn.classList.remove("hidden");
+    document.querySelectorAll(".question").forEach((div, i) => {
+      div.classList.toggle("unanswered-highlight", answers[i] < 0);
+    });
+    const first = document.querySelector(".question.unanswered-highlight");
+    if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Second click submits
+    warn.dataset.confirm = "1";
+    $("submit-btn").textContent = "Submit anyway";
+    $("submit-btn").onclick = () => submitQuiz({ force: true });
+    return;
+  }
+
+  warn.classList.add("hidden");
   $("submit-btn").disabled = true;
+  $("submit-btn").textContent = auto ? "Time’s up — grading…" : "Submitting…";
   try {
     const result = await api(`/api/quiz/${quizId}/submit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answers }),
     });
+    stopTimer();
     showResults(result);
-  } catch (e) { alert(e.message); }
-  finally { $("submit-btn").disabled = false; }
-};
+  } catch (e) {
+    alert(e.message);
+    $("submit-btn").disabled = false;
+    $("submit-btn").textContent = "Submit answers";
+  }
+}
+
+$("submit-btn").onclick = () => submitQuiz({ force: false });
 
 function showResults(result) {
+  lastResult = result;
   result.results.forEach((r, qi) => {
     const qDiv = document.querySelector(`.question[data-index="${qi}"]`);
+    if (!qDiv) return;
+    qDiv.dataset.correct = r.correct ? "1" : "0";
+    qDiv.classList.remove("unanswered-highlight");
     qDiv.querySelectorAll(".option").forEach((label) => {
       const oi = parseInt(label.dataset.option, 10);
-      label.querySelector("input").disabled = true;
+      const input = label.querySelector("input");
+      if (input) input.disabled = true;
       if (oi === r.correct_index) label.classList.add("correct");
       else if (oi === r.chosen_index && !r.correct) label.classList.add("wrong");
     });
+    // Avoid duplicate explain blocks if re-called
+    qDiv.querySelectorAll(".explain").forEach((el) => el.remove());
     const explain = document.createElement("div");
     explain.className = "explain";
-    explain.textContent = r.explanation;
+    explain.textContent = r.explanation || "";
     if (r.source_quote) {
       const q = document.createElement("q");
       q.textContent = ` "${r.source_quote}"`;
@@ -366,19 +553,69 @@ function showResults(result) {
       `<strong>Automatic metrics</strong><br>` +
       `Quote-in-source rate: <strong>${pct(m.quote_in_source_rate)}</strong> ` +
       `(${m.grounded_count}/${m.total_questions}) · ` +
-      `Unique options: ${pct(m.options_unique_rate)}`;
+      `Unique options: ${pct(m.options_unique_rate)} · Difficulty: ${quizMeta.difficulty}`;
     rg.classList.remove("hidden");
   } else {
     rg.classList.add("hidden");
   }
   $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
   $("result-card").classList.remove("hidden");
+  applyReviewFilter();
   $("result-card").scrollIntoView({ behavior: "smooth" });
 }
 
+function applyReviewFilter() {
+  document.querySelectorAll(".question").forEach((div) => {
+    if (!reviewWrongOnly) {
+      div.classList.remove("hidden");
+      return;
+    }
+    const correct = div.dataset.correct === "1";
+    div.classList.toggle("hidden", correct);
+  });
+  $("review-wrong-btn").classList.toggle("hidden", reviewWrongOnly);
+  $("review-all-btn").classList.toggle("hidden", !reviewWrongOnly);
+}
+
+$("review-wrong-btn").onclick = () => {
+  reviewWrongOnly = true;
+  applyReviewFilter();
+  $("quiz-card").scrollIntoView({ behavior: "smooth" });
+};
+
+$("review-all-btn").onclick = () => {
+  reviewWrongOnly = false;
+  applyReviewFilter();
+};
+
+$("print-quiz-btn").onclick = () => window.print();
+$("print-results-btn").onclick = () => window.print();
+
+$("copy-summary-btn").onclick = async () => {
+  if (!lastResult) return;
+  const lines = [
+    `StudyQuiz result`,
+    `Score: ${lastResult.score} / ${lastResult.total}`,
+    `Difficulty: ${quizMeta.difficulty}`,
+    `Quiz ID: ${quizId}`,
+    `Date: ${new Date().toISOString()}`,
+  ];
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    $("copy-summary-btn").textContent = "Copied!";
+    setTimeout(() => { $("copy-summary-btn").textContent = "Copy score summary"; }, 1500);
+  } catch (_) {
+    alert(lines.join("\n"));
+  }
+};
+
 $("again-btn").onclick = () => {
+  stopTimer();
+  reviewWrongOnly = false;
   $("quiz-card").classList.add("hidden");
   $("result-card").classList.add("hidden");
+  $("submit-btn").textContent = "Submit answers";
+  $("submit-btn").onclick = () => submitQuiz({ force: false });
   $("options-card").scrollIntoView({ behavior: "smooth" });
 };
 </script>

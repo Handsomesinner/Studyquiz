@@ -63,9 +63,10 @@ uvicorn app.main:app --reload
 ```
 
 Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
-or any text-based file), choose the number of questions and an optional focus
-topic, and take the quiz. Saved documents reappear in the dropdown after a
-restart.
+or any text-based file), choose the number of questions, difficulty, optional
+focus topic and exam timer, and take the quiz. The UI shows answer progress,
+warns on unanswered items, supports **review wrong only**, and **print / save
+PDF**. Saved documents reappear in the dropdown after a restart.
 
 > **Deploy note:** On **Vercel**, SQLite uses `/tmp/studyquiz.db` (the only
 > writable path). Data lasts for the life of that serverless instance only —
@@ -115,7 +116,7 @@ the raw failure rate — useful for ablation tables.
 |---|---|---|
 | `POST` | `/api/documents` | Upload and index a document |
 | `GET` | `/api/documents` | List indexed documents |
-| `POST` | `/api/quiz` | Generate a quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`) |
+| `POST` | `/api/quiz` | Generate a quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`, `difficulty`) |
 | `POST` | `/api/quiz/{id}/submit` | Grade submitted answers |
 | `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
 | `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |

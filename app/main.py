@@ -124,6 +124,7 @@ class QuizRequest(BaseModel):
     # is not found in the document so students only see verified items.
     # Evaluation metrics still record the full pre-filter generation.
     require_grounding: bool = True
+    difficulty: str = "medium"  # easy | medium | hard
 
 
 def _build_eval_rows(
@@ -192,6 +193,7 @@ def create_quiz(req: QuizRequest):
             questions_per_batch=plan.questions_per_batch,
             topic=req.topic,
             use_rag=req.use_rag,
+            difficulty=req.difficulty,
         )
     except generator.GenerationError as e:
         raise HTTPException(503, str(e))
@@ -263,6 +265,7 @@ def create_quiz(req: QuizRequest):
     return {
         "quiz_id": quiz_id,
         "use_rag": req.use_rag,
+        "difficulty": generator._normalize_difficulty(req.difficulty),
         "questions": [
             {"index": i, "question": q.question, "options": q.options}
             for i, q in enumerate(served_questions)

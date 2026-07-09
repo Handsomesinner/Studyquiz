@@ -56,6 +56,28 @@ SYSTEM_PROMPT = (
     "Vary which option position holds the correct answer."
 )
 
+DIFFICULTY_GUIDANCE = {
+    "easy": (
+        "Difficulty: EASY. Prefer straightforward recall of definitions, "
+        "basic facts, and direct statements from the material. Avoid trick "
+        "questions; keep distractors clearly wrong once the fact is known."
+    ),
+    "medium": (
+        "Difficulty: MEDIUM. Mix recall with light application or comparison. "
+        "Distractors should be plausible misconceptions, not obviously absurd."
+    ),
+    "hard": (
+        "Difficulty: HARD. Prefer higher-order items: multi-step reasoning, "
+        "compare/contrast, edge cases, or subtle distinctions between options. "
+        "Still stay answerable from the material when RAG is on."
+    ),
+}
+
+
+def _normalize_difficulty(difficulty: str | None) -> str:
+    d = (difficulty or "medium").strip().lower()
+    return d if d in DIFFICULTY_GUIDANCE else "medium"
+
 
 def _one_shot_generate(
     *,
@@ -65,6 +87,7 @@ def _one_shot_generate(
     topic: str | None,
     use_rag: bool,
     section_label: str | None = None,
+    difficulty: str = "medium",
 ) -> Quiz:
     if use_rag:
         sources = "\n\n".join(
@@ -96,6 +119,8 @@ def _one_shot_generate(
 
     if topic:
         task += f"\n\nFocus the questions on this topic: {topic}"
+
+    task += "\n\n" + DIFFICULTY_GUIDANCE[_normalize_difficulty(difficulty)]
 
     import anthropic
 
@@ -138,6 +163,7 @@ def generate_quiz(
     context_chunks: list[str],
     topic: str | None,
     use_rag: bool,
+    difficulty: str = "medium",
 ) -> Quiz:
     """Generate a quiz from a single context window (legacy / simple path)."""
     return _one_shot_generate(
@@ -146,6 +172,7 @@ def generate_quiz(
         context_chunks=context_chunks,
         topic=topic,
         use_rag=use_rag,
+        difficulty=difficulty,
     )
 
 
@@ -157,6 +184,7 @@ def generate_quiz_from_batches(
     questions_per_batch: list[int],
     topic: str | None,
     use_rag: bool,
+    difficulty: str = "medium",
 ) -> Quiz:
     """Generate questions section-by-section then merge (long-document path).
 
@@ -170,6 +198,7 @@ def generate_quiz_from_batches(
             context_chunks=[],
             topic=topic,
             use_rag=False,
+            difficulty=difficulty,
         )
 
     if not context_batches:
@@ -183,6 +212,7 @@ def generate_quiz_from_batches(
             context_chunks=context_batches[0],
             topic=topic,
             use_rag=True,
+            difficulty=difficulty,
         )
 
     collected: list[QuizQuestion] = []
@@ -198,6 +228,7 @@ def generate_quiz_from_batches(
             topic=topic,
             use_rag=True,
             section_label=label,
+            difficulty=difficulty,
         )
         collected.extend(part.questions)
 
