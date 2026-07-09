@@ -10,9 +10,10 @@ baseline condition for the project's evaluation chapter: comparing the
 quality of grounded (RAG) vs ungrounded (plain LLM) questions.
 """
 
+from __future__ import annotations
+
 import os
 
-import anthropic
 from pydantic import BaseModel
 
 MODEL = "claude-haiku-4-5"
@@ -34,7 +35,10 @@ class GenerationError(Exception):
     """Raised with a user-presentable message when generation fails."""
 
 
-def _client() -> anthropic.Anthropic:
+def _client():
+    # Lazy import so unit tests (e.g. grounding) don't need the SDK installed.
+    import anthropic
+
     if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
         raise GenerationError(
             "No Anthropic API key configured. Set the ANTHROPIC_API_KEY "
@@ -84,6 +88,8 @@ def generate_quiz(
 
     if topic:
         task += f"\n\nFocus the questions on this topic: {topic}"
+
+    import anthropic
 
     client = _client()
     try:
