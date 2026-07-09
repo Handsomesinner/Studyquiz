@@ -35,12 +35,40 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 @app.on_event("startup")
 def _startup() -> None:
-    store.init_db()
+    # Best-effort: Vercel cold starts may skip or re-run this. Schema is also
+    # applied lazily on the first DB use so a startup failure cannot 500 the site.
+    try:
+        store.init_db()
+    except OSError:
+        pass
 
 
 @app.get("/")
 def home():
-    return FileResponse(STATIC_DIR / "index.html")
+    index = STATIC_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(500, "UI file missing from deployment bundle.")
+    return FileResponse(index)
+
+
+@app.get("/api/health")
+def health():
+    """Lightweight check used to confirm the serverless function boots."""
+    try:
+        store.init_db()
+        db = str(store.db_path())
+        ok = True
+        detail = "ok"
+    except Exception as e:
+        ok = False
+        db = str(store.db_path())
+        detail = f"{type(e).__name__}: {e}"
+    return {
+        "status": "ok" if ok else "degraded",
+        "db_path": db,
+        "serverless": store._running_serverless(),
+        "detail": detail,
+    }
 
 
 @app.post("/api/documents")

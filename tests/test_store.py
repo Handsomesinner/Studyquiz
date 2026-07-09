@@ -16,14 +16,19 @@ from app import store
 def tmp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db = tmp_path / "test.db"
     monkeypatch.setenv("STUDYQUIZ_DB", str(db))
-    # Reset thread-local connection so a new path is used.
+    # Reset thread-local connection + schema flag so a new path is used.
+    conn = getattr(store._local, "conn", None)
+    if conn is not None:
+        conn.close()
     store._local.conn = None
+    store._schema_ready = False
     store.init_db()
     yield db
     conn = getattr(store._local, "conn", None)
     if conn is not None:
         conn.close()
         store._local.conn = None
+    store._schema_ready = False
 
 
 def _sample_question() -> QuizQuestion:
@@ -77,6 +82,7 @@ def test_document_survives_reconnect(tmp_db):
     # Simulate restart: drop connection
     store._local.conn.close()
     store._local.conn = None
+    store._schema_ready = False
 
     doc = store.get_document("doc2")
     assert doc is not None
@@ -147,6 +153,7 @@ def test_eval_rows_persist(tmp_db):
     )
     store._local.conn.close()
     store._local.conn = None
+    store._schema_ready = False
 
     rows = store.list_eval_rows(phase="pre_filter")
     assert len(rows) == 1

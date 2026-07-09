@@ -63,8 +63,11 @@ or any text-based file), choose the number of questions and an optional focus
 topic, and take the quiz. Saved documents reappear in the dropdown after a
 restart.
 
-> **Deploy note:** Vercel’s filesystem is ephemeral. Local demos and a VPS/long-
-> lived host keep the SQLite file; serverless needs an external database later.
+> **Deploy note:** On **Vercel**, SQLite uses `/tmp/studyquiz.db` (the only
+> writable path). Data lasts for the life of that serverless instance only —
+> fine for demos, not for multi-user production. Locally the DB is
+> `data/studyquiz.db`. A long-lived host or external DB is needed for durable
+> multi-instance deploys. Health check: `GET /api/health`.
 
 ## Evaluation mode (for the project write-up)
 

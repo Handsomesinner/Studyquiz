@@ -20,25 +20,57 @@ from .generator import QuizQuestion
 from .grounding import QuestionGrounding
 from .retriever import BM25Retriever
 
-# Default: <repo>/data/studyquiz.db  (override with STUDYQUIZ_DB)
+# Default (local): <repo>/data/studyquiz.db  — override with STUDYQUIZ_DB.
+# On Vercel/Lambda the deployment FS is read-only; only /tmp is writable.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "data" / "studyquiz.db"
 
 _local = threading.local()
+_schema_ready = False
+_schema_lock = threading.Lock()
+
+
+def _running_serverless() -> bool:
+    return bool(
+        os.getenv("VERCEL")
+        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+        or os.getenv("VERCEL_ENV")
+    )
 
 
 def db_path() -> Path:
     raw = os.getenv("STUDYQUIZ_DB")
-    return Path(raw) if raw else DEFAULT_DB_PATH
+    if raw:
+        return Path(raw)
+    if _running_serverless():
+        return Path("/tmp/studyquiz.db")
+    return DEFAULT_DB_PATH
 
 
 def _connect() -> sqlite3.Connection:
     path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only parent — fall back to /tmp so the function still starts.
+        path = Path("/tmp/studyquiz.db")
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Idempotent CREATE TABLE — safe to call on every cold start."""
+    global _schema_ready
+    if _schema_ready:
+        return
+    with _schema_lock:
+        if _schema_ready:
+            return
+        conn.executescript(_SCHEMA_SQL)
+        conn.commit()
+        _schema_ready = True
 
 
 @contextmanager
@@ -48,6 +80,7 @@ def connection() -> Iterator[sqlite3.Connection]:
     if conn is None:
         conn = _connect()
         _local.conn = conn
+    _ensure_schema(conn)
     try:
         yield conn
         conn.commit()
@@ -56,69 +89,70 @@ def connection() -> Iterator[sqlite3.Connection]:
         raise
 
 
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    chunks_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quizzes (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    use_rag INTEGER NOT NULL,
+    topic TEXT,
+    questions_json TEXT NOT NULL,
+    groundings_json TEXT NOT NULL,
+    pre_filter_metrics_json TEXT NOT NULL,
+    served_metrics_json TEXT NOT NULL,
+    context_chunks_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+    id TEXT PRIMARY KEY,
+    quiz_id TEXT NOT NULL,
+    answers_json TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    results_json TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    FOREIGN KEY (quiz_id) REFERENCES quizzes(id)
+);
+
+CREATE TABLE IF NOT EXISTS eval_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    quiz_id TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    document_title TEXT,
+    use_rag INTEGER NOT NULL,
+    topic TEXT,
+    phase TEXT NOT NULL,
+    question_index INTEGER NOT NULL,
+    question TEXT NOT NULL,
+    options TEXT NOT NULL,
+    correct_index INTEGER NOT NULL,
+    source_quote TEXT,
+    grounded INTEGER NOT NULL,
+    match_type TEXT NOT NULL,
+    options_unique INTEGER NOT NULL,
+    expected_grounded INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quizzes_doc ON quizzes(document_id);
+CREATE INDEX IF NOT EXISTS idx_eval_quiz ON eval_rows(quiz_id);
+CREATE INDEX IF NOT EXISTS idx_eval_phase ON eval_rows(phase);
+"""
+
+
 def init_db() -> None:
-    """Create tables if they do not exist."""
-    with connection() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                text TEXT NOT NULL,
-                chunks_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS quizzes (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                use_rag INTEGER NOT NULL,
-                topic TEXT,
-                questions_json TEXT NOT NULL,
-                groundings_json TEXT NOT NULL,
-                pre_filter_metrics_json TEXT NOT NULL,
-                served_metrics_json TEXT NOT NULL,
-                context_chunks_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS quiz_attempts (
-                id TEXT PRIMARY KEY,
-                quiz_id TEXT NOT NULL,
-                answers_json TEXT NOT NULL,
-                score INTEGER NOT NULL,
-                total INTEGER NOT NULL,
-                results_json TEXT NOT NULL,
-                submitted_at TEXT NOT NULL,
-                FOREIGN KEY (quiz_id) REFERENCES quizzes(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS eval_rows (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                quiz_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                document_title TEXT,
-                use_rag INTEGER NOT NULL,
-                topic TEXT,
-                phase TEXT NOT NULL,
-                question_index INTEGER NOT NULL,
-                question TEXT NOT NULL,
-                options TEXT NOT NULL,
-                correct_index INTEGER NOT NULL,
-                source_quote TEXT,
-                grounded INTEGER NOT NULL,
-                match_type TEXT NOT NULL,
-                options_unique INTEGER NOT NULL,
-                expected_grounded INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_quizzes_doc ON quizzes(document_id);
-            CREATE INDEX IF NOT EXISTS idx_eval_quiz ON eval_rows(quiz_id);
-            CREATE INDEX IF NOT EXISTS idx_eval_phase ON eval_rows(phase);
-            """
-        )
+    """Create tables if they do not exist (also runs lazily on first query)."""
+    with connection() as _conn:
+        pass  # connection() already calls _ensure_schema
 
 
 def _now() -> str:
