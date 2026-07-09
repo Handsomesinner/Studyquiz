@@ -5,6 +5,9 @@ FastAPI application tying the pipeline together:
   → generate quiz (generator, Claude) → ground-check (grounding)
   → take quiz → server-side grading.
 
+Documents, quizzes, scores, and evaluation rows are stored in SQLite
+(see ``app/store.py``) so they survive restarts.
+
 Run with:  uvicorn app.main:app --reload
 """
 
@@ -20,21 +23,19 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import generator, grounding, pdf_processor
+from . import generator, grounding, pdf_processor, store
 from .retriever import BM25Retriever
 
 app = FastAPI(title="StudyQuiz")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# In-memory stores. Fine for a single-user demo; the report's "future work"
-# section notes the swap to a database for multi-user deployment.
-DOCUMENTS: dict[str, dict] = {}  # doc_id -> {title, chunks, text, retriever}
-QUIZZES: dict[str, dict] = {}  # quiz_id -> full quiz record (see create_quiz)
-# Flat evaluation rows for CSV export (one row per question).
-EVAL_ROWS: list[dict] = []
-
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    store.init_db()
 
 
 @app.get("/")
@@ -66,16 +67,13 @@ async def upload_document(file: UploadFile):
             "supported (OCR is outside the project scope).",
         )
 
-    retriever = BM25Retriever()
-    retriever.index(chunks)
-
     doc_id = uuid.uuid4().hex[:12]
-    DOCUMENTS[doc_id] = {
-        "title": file.filename,
-        "chunks": chunks,
-        "text": text,  # full document — used for quote-in-source checks
-        "retriever": retriever,
-    }
+    store.save_document(
+        doc_id=doc_id,
+        title=file.filename or "untitled",
+        text=text,
+        chunks=chunks,
+    )
     return {
         "id": doc_id,
         "title": file.filename,
@@ -86,10 +84,7 @@ async def upload_document(file: UploadFile):
 
 @app.get("/api/documents")
 def list_documents():
-    return [
-        {"id": doc_id, "title": doc["title"], "num_chunks": len(doc["chunks"])}
-        for doc_id, doc in DOCUMENTS.items()
-    ]
+    return store.list_documents()
 
 
 class QuizRequest(BaseModel):
@@ -103,7 +98,7 @@ class QuizRequest(BaseModel):
     require_grounding: bool = True
 
 
-def _record_eval_rows(
+def _build_eval_rows(
     *,
     quiz_id: str,
     doc_id: str,
@@ -113,11 +108,11 @@ def _record_eval_rows(
     questions: list,
     groundings: list,
     phase: str,
-) -> None:
-    """Append one CSV-oriented row per question (phase: pre_filter | served)."""
+) -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
+    rows = []
     for i, (q, g) in enumerate(zip(questions, groundings)):
-        EVAL_ROWS.append(
+        rows.append(
             {
                 "timestamp": now,
                 "quiz_id": quiz_id,
@@ -137,11 +132,12 @@ def _record_eval_rows(
                 "expected_grounded": g.expected_grounded,
             }
         )
+    return rows
 
 
 @app.post("/api/quiz")
 def create_quiz(req: QuizRequest):
-    doc = DOCUMENTS.get(req.document_id)
+    doc = store.get_document(req.document_id)
     if doc is None:
         raise HTTPException(404, "Document not found. Upload it again.")
     num_questions = max(1, min(req.num_questions, 15))
@@ -196,36 +192,39 @@ def create_quiz(req: QuizRequest):
     post_metrics = grounding.summarise(served_groundings, use_rag=req.use_rag)
 
     quiz_id = uuid.uuid4().hex[:12]
-    QUIZZES[quiz_id] = {
-        "questions": served_questions,
-        "groundings": served_groundings,
-        "doc_id": req.document_id,
-        "use_rag": req.use_rag,
-        "topic": req.topic,
-        "pre_filter_metrics": pre_metrics.to_dict(),
-        "served_metrics": post_metrics.to_dict(),
-        "context_chunks": context_chunks,
-    }
-
-    _record_eval_rows(
+    store.save_quiz(
         quiz_id=quiz_id,
-        doc_id=req.document_id,
-        doc_title=doc["title"] or "",
-        topic=req.topic,
+        document_id=req.document_id,
         use_rag=req.use_rag,
-        questions=quiz.questions,
-        groundings=pre_groundings,
-        phase="pre_filter",
-    )
-    _record_eval_rows(
-        quiz_id=quiz_id,
-        doc_id=req.document_id,
-        doc_title=doc["title"] or "",
         topic=req.topic,
-        use_rag=req.use_rag,
         questions=served_questions,
         groundings=served_groundings,
-        phase="served",
+        pre_filter_metrics=pre_metrics.to_dict(),
+        served_metrics=post_metrics.to_dict(),
+        context_chunks=context_chunks,
+    )
+
+    store.append_eval_rows(
+        _build_eval_rows(
+            quiz_id=quiz_id,
+            doc_id=req.document_id,
+            doc_title=doc["title"] or "",
+            topic=req.topic,
+            use_rag=req.use_rag,
+            questions=quiz.questions,
+            groundings=pre_groundings,
+            phase="pre_filter",
+        )
+        + _build_eval_rows(
+            quiz_id=quiz_id,
+            doc_id=req.document_id,
+            doc_title=doc["title"] or "",
+            topic=req.topic,
+            use_rag=req.use_rag,
+            questions=served_questions,
+            groundings=served_groundings,
+            phase="served",
+        )
     )
 
     # Answers stay server-side; the client only sees questions and options.
@@ -252,7 +251,7 @@ class SubmitRequest(BaseModel):
 
 @app.post("/api/quiz/{quiz_id}/submit")
 def submit_quiz(quiz_id: str, req: SubmitRequest):
-    quiz = QUIZZES.get(quiz_id)
+    quiz = store.get_quiz(quiz_id)
     if quiz is None:
         raise HTTPException(404, "Quiz not found.")
     questions = quiz["questions"]
@@ -264,7 +263,7 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
     score = 0
     for i, (q, chosen) in enumerate(zip(questions, req.answers)):
         correct = chosen == q.correct_index
-        score += correct
+        score += int(correct)
         g = groundings[i] if i < len(groundings) else None
         results.append(
             {
@@ -277,6 +276,16 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
                 "match_type": g.match_type if g else "unknown",
             }
         )
+
+    store.save_attempt(
+        attempt_id=uuid.uuid4().hex[:12],
+        quiz_id=quiz_id,
+        answers=req.answers,
+        score=score,
+        total=len(questions),
+        results=results,
+    )
+
     return {
         "score": score,
         "total": len(questions),
@@ -288,14 +297,14 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
 @app.get("/api/quiz/{quiz_id}/evaluation")
 def quiz_evaluation(quiz_id: str):
     """JSON evaluation summary for one quiz (for the report / tooling)."""
-    quiz = QUIZZES.get(quiz_id)
+    quiz = store.get_quiz(quiz_id)
     if quiz is None:
         raise HTTPException(404, "Quiz not found.")
-    doc = DOCUMENTS.get(quiz["doc_id"], {})
+    doc = store.get_document(quiz["doc_id"])
     return {
         "quiz_id": quiz_id,
         "document_id": quiz["doc_id"],
-        "document_title": doc.get("title"),
+        "document_title": doc.get("title") if doc else None,
         "use_rag": quiz["use_rag"],
         "topic": quiz.get("topic"),
         "pre_filter_metrics": quiz.get("pre_filter_metrics"),
@@ -323,7 +332,8 @@ def export_evaluation_csv():
     Columns support the evaluation chapter: compare RAG vs baseline on
     quote_in_source (grounded), match_type, and options_unique.
     """
-    if not EVAL_ROWS:
+    eval_rows = store.list_eval_rows()
+    if not eval_rows:
         raise HTTPException(
             404,
             "No evaluation data yet. Generate at least one quiz first.",
@@ -350,7 +360,7 @@ def export_evaluation_csv():
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
-    for row in EVAL_ROWS:
+    for row in eval_rows:
         writer.writerow(row)
 
     buf.seek(0)
@@ -365,13 +375,14 @@ def export_evaluation_csv():
 @app.get("/api/evaluation/summary")
 def evaluation_summary():
     """Aggregate quote-in-source rates by condition (RAG vs baseline)."""
-    if not EVAL_ROWS:
+    eval_rows = store.list_eval_rows()
+    if not eval_rows:
         return {"quizzes": 0, "by_condition": {}}
 
     # Use pre_filter rows so filtering does not hide model failure rate.
-    rows = [r for r in EVAL_ROWS if r.get("phase") == "pre_filter"]
+    rows = [r for r in eval_rows if r.get("phase") == "pre_filter"]
     if not rows:
-        rows = EVAL_ROWS
+        rows = eval_rows
 
     by: dict[str, dict] = {}
     for r in rows:

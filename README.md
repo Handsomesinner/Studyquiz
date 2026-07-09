@@ -44,11 +44,15 @@ evaluation chapter to compare grounded vs ungrounded question quality.
   is an automatic metric for the evaluation chapter (RAG vs baseline).
 - **Grading** — answers are kept server-side; the browser never sees the
   correct option until the quiz is submitted.
+- **Persistence** — `store.py` saves documents, quizzes, attempt scores, and
+  evaluation rows in **SQLite** (`data/studyquiz.db` by default). Restart the
+  server and previous uploads are still available. Override the path with
+  `STUDYQUIZ_DB=/path/to/file.db`.
 
 ## Running it
 
 ```bash
-cd study-assistant
+cd studyquiz
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...   # get one at https://platform.claude.com/
 uvicorn app.main:app --reload
@@ -56,7 +60,11 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
 or any text-based file), choose the number of questions and an optional focus
-topic, and take the quiz.
+topic, and take the quiz. Saved documents reappear in the dropdown after a
+restart.
+
+> **Deploy note:** Vercel’s filesystem is ephemeral. Local demos and a VPS/long-
+> lived host keep the SQLite file; serverless needs an external database later.
 
 ## Evaluation mode (for the project write-up)
 
@@ -91,7 +99,8 @@ the raw failure rate — useful for ablation tables.
 
 - Text-based documents (PDF, Word, PowerPoint, plain text) — scanned/handwritten documents (OCR) are out of scope.
 - Multiple-choice questions only; essay grading is out of scope.
-- In-memory storage (single-user demo); a database is listed as future work.
+- Single-user SQLite store (no accounts yet); multi-user auth is future work.
+  Serverless hosts still need external storage for durable multi-instance use.
 
 ## API
 

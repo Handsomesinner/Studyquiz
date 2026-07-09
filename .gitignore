@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local SQLite DB and runtime data
+data/
+*.db
+*.db-journal

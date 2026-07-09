@@ -66,6 +66,13 @@
     <h2>Upload lecture material</h2>
     <input type="file" id="file" />
     <button id="upload-btn">Upload</button>
+    <div id="previous-docs" class="hidden" style="margin-top:1rem">
+      <label for="doc-select">Or reuse a saved document (survives restarts)</label>
+      <select id="doc-select">
+        <option value="">— choose a previous upload —</option>
+      </select>
+      <button class="secondary" id="use-doc-btn" type="button">Use selected</button>
+    </div>
     <div class="status" id="upload-status"></div>
   </section>
 
@@ -135,6 +142,34 @@ async function api(path, options) {
   return body;
 }
 
+async function refreshDocumentList(selectId) {
+  try {
+    const docs = await api("/api/documents");
+    const sel = $("doc-select");
+    const prev = selectId || sel.value;
+    sel.innerHTML = '<option value="">— choose a previous upload —</option>';
+    docs.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = `${d.title} (${d.num_chunks} chunks)`;
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+    $("previous-docs").classList.toggle("hidden", docs.length === 0);
+  } catch (_) {
+    /* ignore list errors on first paint */
+  }
+}
+
+function selectDocument(id, title, detail) {
+  docId = id;
+  $("upload-status").className = "status";
+  $("upload-status").textContent = detail || `Using saved document "${title}".`;
+  $("options-card").classList.remove("hidden");
+}
+
+refreshDocumentList();
+
 function pct(rate) {
   return `${Math.round((rate || 0) * 100)}%`;
 }
@@ -177,12 +212,27 @@ $("upload-btn").onclick = async () => {
     const form = new FormData();
     form.append("file", file);
     const doc = await api("/api/documents", { method: "POST", body: form });
-    docId = doc.id;
-    status.textContent = `Indexed "${doc.title}" — ${doc.num_words.toLocaleString()} words in ${doc.num_chunks} chunks.`;
-    $("options-card").classList.remove("hidden");
+    selectDocument(
+      doc.id,
+      doc.title,
+      `Saved & indexed "${doc.title}" — ${doc.num_words.toLocaleString()} words in ${doc.num_chunks} chunks.`
+    );
+    await refreshDocumentList(doc.id);
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
   } finally { $("upload-btn").disabled = false; }
+};
+
+$("use-doc-btn").onclick = () => {
+  const sel = $("doc-select");
+  const id = sel.value;
+  if (!id) {
+    $("upload-status").textContent = "Pick a saved document first.";
+    $("upload-status").className = "status error";
+    return;
+  }
+  const title = sel.options[sel.selectedIndex].textContent;
+  selectDocument(id, title, `Using saved document: ${title}`);
 };
 
 $("generate-btn").onclick = async () => {
