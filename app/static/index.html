@@ -12,11 +12,20 @@
   }
   * { box-sizing: border-box; margin: 0; }
   body { font-family: Georgia, "Times New Roman", serif; background: var(--paper); color: var(--ink); line-height: 1.55; }
-  header { padding: 2.2rem 1rem 1.2rem; text-align: center; }
+  header { padding: 2rem 1rem 0.8rem; text-align: center; }
   header h1 { font-size: 1.9rem; letter-spacing: -0.5px; }
   header h1 span { color: var(--accent); font-style: italic; }
   header p { color: var(--muted); font-size: 0.95rem; margin-top: 0.3rem; }
-  main { max-width: 720px; margin: 0 auto; padding: 0 1rem 4rem; }
+  main { max-width: 760px; margin: 0 auto; padding: 0 1rem 4rem; }
+  .mode-switch {
+    display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap;
+    margin: 0.9rem auto 0; font-family: system-ui, sans-serif;
+  }
+  .mode-switch button {
+    margin-top: 0; background: #fff; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 999px; padding: 0.45rem 1rem; font-size: 0.88rem;
+  }
+  .mode-switch button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1.4rem; margin-top: 1.2rem; }
   .card h2 { font-size: 1.05rem; margin-bottom: 0.8rem; }
   .step { display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 0.75rem; padding: 0.1rem 0.65rem; font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 0.5rem; }
@@ -33,6 +42,7 @@
   .toggle label { margin: 0; color: var(--muted); }
   .status { font-family: system-ui, sans-serif; font-size: 0.85rem; margin-top: 0.8rem; color: var(--muted); }
   .status.error { color: var(--wrong); }
+  .hint { font-family: system-ui, sans-serif; font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; }
   .metrics { font-family: system-ui, sans-serif; font-size: 0.85rem; background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 0.75rem 0.9rem; margin-top: 0.9rem; line-height: 1.45; }
   .metrics strong { color: var(--ink); }
   .metrics code { font-size: 0.8rem; background: rgba(0,0,0,0.05); padding: 0.05rem 0.3rem; border-radius: 4px; }
@@ -44,17 +54,9 @@
   }
   .progress-wrap { flex: 1; min-width: 160px; }
   .progress-label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; }
-  .progress-bar {
-    height: 8px; background: var(--line); border-radius: 999px; overflow: hidden;
-  }
-  .progress-bar > span {
-    display: block; height: 100%; width: 0%; background: var(--accent);
-    transition: width 0.2s ease;
-  }
-  .timer {
-    font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink);
-    background: var(--accent-soft); padding: 0.35rem 0.7rem; border-radius: 999px;
-  }
+  .progress-bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .progress-bar > span { display: block; height: 100%; width: 0%; background: var(--accent); transition: width 0.2s ease; }
+  .timer { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); background: var(--accent-soft); padding: 0.35rem 0.7rem; border-radius: 999px; }
   .timer.warn { background: var(--warn-soft); color: var(--warn); }
   .timer.danger { background: var(--wrong-soft); color: var(--wrong); }
 
@@ -78,11 +80,48 @@
   .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
   .hidden { display: none !important; }
 
+  /* Exam paper look */
+  .exam-sheet {
+    background: #fffef8; border: 1px solid #d4cfc0; padding: 1.5rem 1.25rem 2rem;
+    border-radius: 4px;
+  }
+  .exam-header { text-align: center; margin-bottom: 1.1rem; }
+  .exam-header .inst { font-weight: bold; font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.02em; }
+  .exam-header .sub { font-size: 0.95rem; margin-top: 0.15rem; }
+  .exam-header .exam-title { font-weight: bold; margin-top: 0.55rem; text-decoration: underline; }
+  .exam-meta { font-size: 0.92rem; margin-top: 0.7rem; text-align: left; }
+  .exam-meta .line { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-top: 0.2rem; }
+  .exam-instructions { margin: 1rem 0 1.2rem; font-size: 0.92rem; }
+  .exam-instructions strong { text-decoration: underline; }
+  .exam-instructions ol { margin: 0.35rem 0 0 1.2rem; }
+  .exam-q { margin-top: 1.35rem; page-break-inside: avoid; }
+  .exam-q h3 {
+    font-size: 1rem; text-align: center; text-decoration: underline;
+    margin-bottom: 0.7rem; letter-spacing: 0.04em;
+  }
+  .exam-part { margin: 0.55rem 0 0.55rem 0.15rem; font-size: 0.96rem; }
+  .exam-part .part-head { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
+  .exam-part .part-text { flex: 1; }
+  .exam-part .marks {
+    white-space: nowrap; font-size: 0.88rem; color: var(--muted);
+    font-family: system-ui, sans-serif;
+  }
+  .exam-sub { margin: 0.25rem 0 0.25rem 1.4rem; }
+  .exam-guide {
+    margin: 0.45rem 0 0.2rem 0.5rem; padding: 0.55rem 0.7rem;
+    background: var(--accent-soft); border-radius: 6px;
+    font-family: system-ui, sans-serif; font-size: 0.82rem; color: var(--ink);
+  }
+  .exam-guide ul { margin: 0.25rem 0 0 1.1rem; }
+  .exam-quote { font-size: 0.82rem; color: var(--muted); margin-top: 0.3rem; font-style: italic; }
+
   @media print {
     body { background: #fff; }
-    header p, .step, #upload-card, #options-card, .no-print,
-    #submit-btn, #again-btn, a.button-link, button { display: none !important; }
-    .card { border: none; padding: 0; margin: 0; }
+    header, .step, #upload-card, #options-card, .no-print,
+    .mode-switch, button, a.button-link { display: none !important; }
+    .card { border: none; padding: 0; margin: 0; box-shadow: none; }
+    .exam-sheet { border: none; background: #fff; padding: 0; }
+    .exam-guide { border: 1px solid #ccc; }
     .question { break-inside: avoid; page-break-inside: avoid; }
     .timer, .progress-wrap { display: none !important; }
   }
@@ -91,7 +130,11 @@
 <body>
 <header>
   <h1>Study<span>Quiz</span></h1>
-  <p>Retrieval-augmented quiz generation from your own lecture materials</p>
+  <p>Retrieval-augmented practice from your own lecture materials</p>
+  <div class="mode-switch no-print" role="tablist" aria-label="Quiz mode">
+    <button type="button" id="mode-mcq" class="active" data-mode="mcq">MCQ Quiz</button>
+    <button type="button" id="mode-exam" data-mode="exam">Exam Quiz (theory paper)</button>
+  </div>
 </header>
 <main>
 
@@ -112,28 +155,42 @@
 
   <section class="card hidden" id="options-card">
     <span class="step">Step 2</span>
-    <h2>Generate a quiz</h2>
+    <h2 id="options-title">Generate a quiz</h2>
+    <p class="hint" id="mode-hint">MCQ mode: multiple-choice questions with automatic scoring.</p>
+
     <div class="row">
       <div>
-        <label for="num">Number of questions</label>
+        <label for="num" id="num-label">Number of questions</label>
         <input type="number" id="num" min="1" max="15" value="5" />
       </div>
       <div>
         <label for="topic">Focus topic (optional)</label>
-        <input type="text" id="topic" placeholder="e.g. process scheduling" />
+        <input type="text" id="topic" placeholder="e.g. process scheduling / network attacks" />
       </div>
     </div>
+
+    <div class="row" id="exam-fields">
+      <div>
+        <label for="course-code">Course code (exam header)</label>
+        <input type="text" id="course-code" placeholder="e.g. CSC 409" />
+      </div>
+      <div>
+        <label for="course-title">Course title (exam header)</label>
+        <input type="text" id="course-title" placeholder="e.g. Computer Information Security" />
+      </div>
+    </div>
+
     <div class="row">
       <div>
         <label for="difficulty">Difficulty</label>
         <select id="difficulty">
           <option value="easy">Easy — recall & definitions</option>
           <option value="medium" selected>Medium — mix of recall & application</option>
-          <option value="hard">Hard — reasoning & subtle distinctions</option>
+          <option value="hard">Hard — deeper discuss / compare</option>
         </select>
       </div>
-      <div>
-        <label for="timer-mins">Exam timer (optional)</label>
+      <div id="timer-field">
+        <label for="timer-mins">Exam timer (MCQ optional)</label>
         <select id="timer-mins">
           <option value="0" selected>Off</option>
           <option value="5">5 minutes</option>
@@ -143,20 +200,27 @@
           <option value="30">30 minutes</option>
         </select>
       </div>
+      <div id="time-allowed-field" class="hidden">
+        <label for="time-allowed">Time allowed (on paper)</label>
+        <input type="text" id="time-allowed" value="2 Hrs." />
+      </div>
     </div>
+
     <div class="toggle">
       <input type="checkbox" id="use-rag" checked />
-      <label for="use-rag">Ground questions in the document (RAG) — untick for the plain-LLM baseline</label>
+      <label for="use-rag">Ground questions in the document (RAG) — untick for plain-LLM baseline</label>
     </div>
-    <div class="toggle">
+    <div class="toggle" id="grounding-toggle">
       <input type="checkbox" id="require-grounding" checked />
-      <label for="require-grounding">Require verified source quotes (drop questions whose quote is not in the document)</label>
+      <label for="require-grounding">Require verified source quotes (MCQ only — drop unverified items)</label>
     </div>
+
     <button id="generate-btn">Generate quiz</button>
     <div class="status" id="generate-status"></div>
     <div class="metrics hidden" id="grounding-metrics"></div>
   </section>
 
+  <!-- MCQ take quiz -->
   <section class="card hidden" id="quiz-card">
     <span class="step">Step 3</span>
     <h2 id="quiz-title">Take the quiz</h2>
@@ -182,7 +246,7 @@
     <div class="scoreband" id="scoreband"></div>
     <div class="metrics hidden" id="result-grounding"></div>
     <div class="actions no-print">
-      <button class="secondary" id="again-btn">Generate another quiz</button>
+      <button class="secondary" id="again-btn">Generate another</button>
       <button class="secondary" id="review-wrong-btn" type="button">Review wrong only</button>
       <button class="secondary" id="review-all-btn" type="button">Show all</button>
       <button class="secondary" id="print-results-btn" type="button">Print results</button>
@@ -192,14 +256,30 @@
     </div>
   </section>
 
+  <!-- Exam theory paper -->
+  <section class="card hidden" id="exam-card">
+    <span class="step">Step 3</span>
+    <h2>Exam paper (practice)</h2>
+    <p class="hint no-print">Written-style questions like Nigerian university theory exams. Practise answering in your notebook, then reveal revision guides.</p>
+    <div id="exam-sheet" class="exam-sheet"></div>
+    <div class="actions no-print">
+      <button class="secondary" id="toggle-guides-btn" type="button">Show revision guides</button>
+      <button class="secondary" id="print-exam-btn" type="button">Print / save PDF</button>
+      <button class="secondary" id="exam-again-btn" type="button">Generate another paper</button>
+    </div>
+  </section>
+
 </main>
 <script>
-let docId = null, quizId = null, questionCount = 0;
+let docId = null, quizId = null, examId = null, questionCount = 0;
 let lastResult = null;
 let quizMeta = { difficulty: "medium" };
 let timerInterval = null;
 let timerEndsAt = null;
 let reviewWrongOnly = false;
+let appMode = "mcq"; // mcq | exam
+let guidesVisible = false;
+let lastExamPayload = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -219,6 +299,36 @@ async function api(path, options) {
   if (!res.ok) throw new Error(errorDetail(body, res.status));
   return body;
 }
+
+function setMode(mode) {
+  appMode = mode === "exam" ? "exam" : "mcq";
+  $("mode-mcq").classList.toggle("active", appMode === "mcq");
+  $("mode-exam").classList.toggle("active", appMode === "exam");
+
+  const isExam = appMode === "exam";
+  $("options-title").textContent = isExam ? "Generate an exam paper" : "Generate a quiz";
+  $("mode-hint").textContent = isExam
+    ? "Exam Quiz: Nigerian-style theory paper — Discuss / Define / parts (a)(b) with marks. For written exam prep (not auto-scored)."
+    : "MCQ mode: multiple-choice questions with automatic scoring.";
+  $("num-label").textContent = isExam ? "Number of major questions (QUESTION ONE…)" : "Number of MCQ questions";
+  $("num").min = isExam ? 2 : 1;
+  $("num").max = isExam ? 6 : 15;
+  $("num").value = isExam ? 4 : 5;
+  $("exam-fields").classList.toggle("hidden", !isExam);
+  $("timer-field").classList.toggle("hidden", isExam);
+  $("time-allowed-field").classList.toggle("hidden", !isExam);
+  $("grounding-toggle").classList.toggle("hidden", isExam);
+  $("generate-btn").textContent = isExam ? "Generate exam paper" : "Generate quiz";
+
+  // Hide other step-3 cards when switching
+  $("quiz-card").classList.add("hidden");
+  $("result-card").classList.add("hidden");
+  $("exam-card").classList.add("hidden");
+}
+
+$("mode-mcq").onclick = () => setMode("mcq");
+$("mode-exam").onclick = () => setMode("exam");
+setMode("mcq");
 
 async function refreshDocumentList(selectId) {
   try {
@@ -268,15 +378,10 @@ function renderGroundingMetrics(g, el, retrieval) {
     const mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
     lines.push(
       `<strong>Grounding check</strong> — ${mode}`,
-      `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found in the document (${pct(pre.quote_in_source_rate)} quote-in-source rate)`
+      `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found (${pct(pre.quote_in_source_rate)})`
     );
     if (g.filtered_out > 0) {
       lines.push(`Filtered out <strong>${g.filtered_out}</strong> unverified question(s); serving ${served.total_questions ?? 0}.`);
-    } else if (served.total_questions != null) {
-      lines.push(`Serving ${served.total_questions} question(s).`);
-    }
-    if (pre.use_rag === false) {
-      lines.push(`Baseline mode: empty-quote rate ${pct(pre.empty_quote_rate)} (expected high).`);
     }
   }
   el.innerHTML = lines.join("<br>");
@@ -296,14 +401,11 @@ function updateProgress() {
   const total = questionCount;
   $("progress-text").textContent = `Answered ${answered} of ${total}`;
   $("progress-fill").style.width = total ? `${(answered / total) * 100}%` : "0%";
-  $("current-q-hint").textContent = total ? `${answered === total ? "Ready to submit" : `${total - answered} left`}` : "";
+  $("current-q-hint").textContent = total ? (answered === total ? "Ready to submit" : `${total - answered} left`) : "";
 }
 
 function stopTimer() {
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   timerEndsAt = null;
 }
 
@@ -316,10 +418,7 @@ function formatTime(secs) {
 function startTimer(minutes) {
   stopTimer();
   const display = $("timer-display");
-  if (!minutes || minutes <= 0) {
-    display.classList.add("hidden");
-    return;
-  }
+  if (!minutes || minutes <= 0) { display.classList.add("hidden"); return; }
   timerEndsAt = Date.now() + minutes * 60 * 1000;
   display.classList.remove("hidden", "warn", "danger");
   const tick = () => {
@@ -378,9 +477,14 @@ $("use-doc-btn").onclick = () => {
 };
 
 $("generate-btn").onclick = async () => {
+  if (appMode === "exam") return generateExam();
+  return generateMcq();
+};
+
+async function generateMcq() {
   const status = $("generate-status");
   $("generate-btn").disabled = true;
-  status.className = "status"; status.textContent = "Generating questions with Claude — this takes a few seconds…";
+  status.className = "status"; status.textContent = "Generating MCQ with Claude…";
   $("grounding-metrics").classList.add("hidden");
   stopTimer();
   try {
@@ -405,19 +509,63 @@ $("generate-btn").onclick = async () => {
     renderGroundingMetrics(quiz.grounding, $("grounding-metrics"), quiz.retrieval);
     status.textContent = "";
     $("result-card").classList.add("hidden");
+    $("exam-card").classList.add("hidden");
     $("quiz-card").classList.remove("hidden");
     $("submit-btn").classList.remove("hidden");
     $("submit-btn").disabled = false;
+    $("submit-btn").textContent = "Submit answers";
+    $("submit-btn").onclick = () => submitQuiz({ force: false });
     $("submit-warning").classList.add("hidden");
     $("quiz-title").textContent = `Take the quiz (${quizMeta.difficulty})`;
     $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
-    const mins = parseInt($("timer-mins").value, 10) || 0;
-    startTimer(mins);
+    startTimer(parseInt($("timer-mins").value, 10) || 0);
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
   } finally { $("generate-btn").disabled = false; }
-};
+}
+
+async function generateExam() {
+  const status = $("generate-status");
+  $("generate-btn").disabled = true;
+  status.className = "status";
+  status.textContent = "Setting a theory exam paper with Claude — this may take a bit longer…";
+  $("grounding-metrics").classList.add("hidden");
+  guidesVisible = false;
+  try {
+    const exam = await api("/api/exam", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        document_id: docId,
+        num_questions: parseInt($("num").value, 10) || 4,
+        topic: $("topic").value.trim() || null,
+        use_rag: $("use-rag").checked,
+        difficulty: $("difficulty").value || "medium",
+        course_code: $("course-code").value.trim() || null,
+        course_title: $("course-title").value.trim() || null,
+        time_allowed: $("time-allowed").value.trim() || "2 Hrs.",
+      }),
+    });
+    examId = exam.exam_id;
+    lastExamPayload = exam;
+    renderExamPaper(exam);
+    renderGroundingMetrics(null, $("grounding-metrics"), exam.retrieval);
+    const extra = document.createElement("div");
+    // append total marks into metrics
+    const m = $("grounding-metrics");
+    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks total (all parts).`;
+    m.classList.remove("hidden");
+    status.textContent = "";
+    $("quiz-card").classList.add("hidden");
+    $("result-card").classList.add("hidden");
+    $("exam-card").classList.remove("hidden");
+    $("toggle-guides-btn").textContent = "Show revision guides";
+    $("exam-card").scrollIntoView({ behavior: "smooth" });
+  } catch (e) {
+    status.textContent = e.message; status.className = "status error";
+  } finally { $("generate-btn").disabled = false; }
+}
 
 function renderQuiz(questions) {
   const holder = $("questions");
@@ -453,6 +601,86 @@ function renderQuiz(questions) {
   updateProgress();
 }
 
+function renderExamPaper(exam) {
+  const paper = exam.paper;
+  const sheet = $("exam-sheet");
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+
+  let html = `<div class="exam-header">
+    <div class="inst">${esc(paper.institution || "StudyQuiz Exam Prep")}</div>
+    <div class="sub">${esc(paper.faculty || "")}</div>
+    <div class="sub">${esc(paper.department || "")}</div>
+    <div class="exam-title">${esc(paper.exam_title || "BSc. Degree Examination (Practice Paper)")}</div>
+    <div class="sub">${esc(paper.session || "Practice Session")}</div>
+    <div class="exam-meta">
+      <div class="line"><span><strong>Course Code:</strong> ${esc(paper.course_code)}</span>
+        <span><strong>Course Unit:</strong> ${esc(paper.course_unit || "2")}</span></div>
+      <div class="line"><span><strong>Course Title:</strong> ${esc(paper.course_title)}</span></div>
+      <div class="line"><span><strong>Time Allowed:</strong> ${esc(paper.time_allowed || "2 Hrs.")}</span>
+        <span><strong>Total (all parts):</strong> ${esc(exam.total_marks)} Marks</span></div>
+    </div>
+  </div>`;
+
+  html += `<div class="exam-instructions"><strong>INSTRUCTIONS:</strong><ol>`;
+  (paper.instructions || []).forEach((ins) => {
+    html += `<li>${esc(ins)}</li>`;
+  });
+  html += `</ol></div>`;
+
+  (paper.questions || []).forEach((q) => {
+    html += `<div class="exam-q"><h3>${esc(q.heading || ("QUESTION " + q.number))}</h3>`;
+    (q.parts || []).forEach((part) => {
+      const marksLabel = Number(part.marks) === part.marks && part.marks % 1 !== 0
+        ? `${part.marks} Marks`
+        : `${part.marks} Mark${part.marks === 1 ? "" : "s"}`;
+      html += `<div class="exam-part">
+        <div class="part-head">
+          <div class="part-text"><strong>${esc(part.label)})</strong> ${esc(part.prompt)}`;
+      if (part.subparts && part.subparts.length) {
+        part.subparts.forEach((sp) => {
+          html += `<div class="exam-sub"><strong>${esc(sp.label)}.</strong> ${esc(sp.text)}</div>`;
+        });
+      }
+      html += `</div><div class="marks">(${esc(marksLabel)})</div></div>`;
+
+      // Revision guide (hidden until toggled)
+      html += `<div class="exam-guide guide-block hidden">`;
+      if (part.guide_points && part.guide_points.length) {
+        html += `<strong>Revision guide</strong><ul>`;
+        part.guide_points.forEach((gp) => { html += `<li>${esc(gp)}</li>`; });
+        html += `</ul>`;
+      } else {
+        html += `<em>No guide points returned for this part.</em>`;
+      }
+      if (part.source_quote) {
+        html += `<div class="exam-quote">From material: “${esc(part.source_quote)}”</div>`;
+      }
+      html += `</div></div>`;
+    });
+    html += `</div>`;
+  });
+
+  sheet.innerHTML = html;
+}
+
+$("toggle-guides-btn").onclick = () => {
+  guidesVisible = !guidesVisible;
+  document.querySelectorAll(".guide-block").forEach((el) => {
+    el.classList.toggle("hidden", !guidesVisible);
+  });
+  $("toggle-guides-btn").textContent = guidesVisible
+    ? "Hide revision guides"
+    : "Show revision guides";
+};
+
+$("print-exam-btn").onclick = () => window.print();
+$("exam-again-btn").onclick = () => {
+  $("exam-card").classList.add("hidden");
+  $("options-card").scrollIntoView({ behavior: "smooth" });
+};
+
 function collectAnswers() {
   const answers = [];
   for (let i = 0; i < questionCount; i++) {
@@ -475,8 +703,6 @@ async function submitQuiz({ force = false, auto = false } = {}) {
     });
     const first = document.querySelector(".question.unanswered-highlight");
     if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
-    // Second click submits
-    warn.dataset.confirm = "1";
     $("submit-btn").textContent = "Submit anyway";
     $("submit-btn").onclick = () => submitQuiz({ force: true });
     return;
@@ -500,8 +726,6 @@ async function submitQuiz({ force = false, auto = false } = {}) {
   }
 }
 
-$("submit-btn").onclick = () => submitQuiz({ force: false });
-
 function showResults(result) {
   lastResult = result;
   result.results.forEach((r, qi) => {
@@ -516,7 +740,6 @@ function showResults(result) {
       if (oi === r.correct_index) label.classList.add("correct");
       else if (oi === r.chosen_index && !r.correct) label.classList.add("wrong");
     });
-    // Avoid duplicate explain blocks if re-called
     qDiv.querySelectorAll(".explain").forEach((el) => el.remove());
     const explain = document.createElement("div");
     explain.className = "explain";
@@ -552,8 +775,7 @@ function showResults(result) {
     rg.innerHTML =
       `<strong>Automatic metrics</strong><br>` +
       `Quote-in-source rate: <strong>${pct(m.quote_in_source_rate)}</strong> ` +
-      `(${m.grounded_count}/${m.total_questions}) · ` +
-      `Unique options: ${pct(m.options_unique_rate)} · Difficulty: ${quizMeta.difficulty}`;
+      `(${m.grounded_count}/${m.total_questions}) · Difficulty: ${quizMeta.difficulty}`;
     rg.classList.remove("hidden");
   } else {
     rg.classList.add("hidden");
@@ -566,28 +788,15 @@ function showResults(result) {
 
 function applyReviewFilter() {
   document.querySelectorAll(".question").forEach((div) => {
-    if (!reviewWrongOnly) {
-      div.classList.remove("hidden");
-      return;
-    }
-    const correct = div.dataset.correct === "1";
-    div.classList.toggle("hidden", correct);
+    if (!reviewWrongOnly) { div.classList.remove("hidden"); return; }
+    div.classList.toggle("hidden", div.dataset.correct === "1");
   });
   $("review-wrong-btn").classList.toggle("hidden", reviewWrongOnly);
   $("review-all-btn").classList.toggle("hidden", !reviewWrongOnly);
 }
 
-$("review-wrong-btn").onclick = () => {
-  reviewWrongOnly = true;
-  applyReviewFilter();
-  $("quiz-card").scrollIntoView({ behavior: "smooth" });
-};
-
-$("review-all-btn").onclick = () => {
-  reviewWrongOnly = false;
-  applyReviewFilter();
-};
-
+$("review-wrong-btn").onclick = () => { reviewWrongOnly = true; applyReviewFilter(); $("quiz-card").scrollIntoView({ behavior: "smooth" }); };
+$("review-all-btn").onclick = () => { reviewWrongOnly = false; applyReviewFilter(); };
 $("print-quiz-btn").onclick = () => window.print();
 $("print-results-btn").onclick = () => window.print();
 
@@ -604,9 +813,7 @@ $("copy-summary-btn").onclick = async () => {
     await navigator.clipboard.writeText(lines.join("\n"));
     $("copy-summary-btn").textContent = "Copied!";
     setTimeout(() => { $("copy-summary-btn").textContent = "Copy score summary"; }, 1500);
-  } catch (_) {
-    alert(lines.join("\n"));
-  }
+  } catch (_) { alert(lines.join("\n")); }
 };
 
 $("again-btn").onclick = () => {

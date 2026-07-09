@@ -3,13 +3,24 @@
 Final year project — **Famule Oluwapamilerin Solomon (FTP/CSC/26/0133938)**, Department of Computer Science.
 Supervisor: Dr. Aderibigbe.
 
-StudyQuiz is an AI study assistant that generates multiple-choice quizzes from a
+StudyQuiz is an AI study assistant that generates practice assessments from a
 student's own lecture PDFs. It uses **Retrieval-Augmented Generation (RAG)**: the
 relevant parts of the uploaded document are retrieved and given to a large
 language model (Claude), so every question is grounded in the actual course
 material instead of hallucinated. A built-in **baseline mode** generates
 questions *without* the retrieved context, which is used in the project's
 evaluation chapter to compare grounded vs ungrounded question quality.
+
+### Two practice modes
+
+| Mode | What you get | Scoring |
+|------|----------------|---------|
+| **MCQ Quiz** | Multiple-choice items with 4 options | Automatic |
+| **Exam Quiz** | Nigerian-style theory paper: QUESTION ONE/TWO, parts (a)(b), roman (i)(ii), marks | Self-practice + revision guides (not auto-marked) |
+
+Exam Quiz mirrors written BSc papers (Discuss / Define / Explain with mark
+allocations), so students can prepare for exams the way lecturers actually set
+questions.
 
 ## Architecture (maps to Chapter 3 of the report)
 
@@ -116,8 +127,10 @@ the raw failure rate — useful for ablation tables.
 |---|---|---|
 | `POST` | `/api/documents` | Upload and index a document |
 | `GET` | `/api/documents` | List indexed documents |
-| `POST` | `/api/quiz` | Generate a quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`, `difficulty`) |
-| `POST` | `/api/quiz/{id}/submit` | Grade submitted answers |
+| `POST` | `/api/quiz` | Generate MCQ quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`, `difficulty`) |
+| `POST` | `/api/quiz/{id}/submit` | Grade submitted MCQ answers |
+| `POST` | `/api/exam` | Generate theory **Exam Quiz** paper (`num_questions` major questions, `course_code`, `course_title`, …) |
+| `GET` | `/api/exam/{id}` | Fetch a saved exam paper |
 | `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
 | `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |
 | `GET` | `/api/evaluation/export` | CSV export of all evaluation rows |

@@ -143,9 +143,22 @@ CREATE TABLE IF NOT EXISTS eval_rows (
     expected_grounded INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS exam_papers (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    use_rag INTEGER NOT NULL,
+    topic TEXT,
+    difficulty TEXT,
+    paper_json TEXT NOT NULL,
+    context_chunks_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_quizzes_doc ON quizzes(document_id);
 CREATE INDEX IF NOT EXISTS idx_eval_quiz ON eval_rows(quiz_id);
 CREATE INDEX IF NOT EXISTS idx_eval_phase ON eval_rows(phase);
+CREATE INDEX IF NOT EXISTS idx_exam_doc ON exam_papers(document_id);
 """
 
 
@@ -317,6 +330,62 @@ def get_quiz(quiz_id: str) -> dict | None:
         "topic": row["topic"],
         "pre_filter_metrics": _loads(row["pre_filter_metrics_json"]),
         "served_metrics": _loads(row["served_metrics_json"]),
+        "context_chunks": _loads(row["context_chunks_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Exam papers (theory / Nigerian-style written exams)
+# ---------------------------------------------------------------------------
+
+
+def save_exam_paper(
+    *,
+    exam_id: str,
+    document_id: str,
+    use_rag: bool,
+    topic: str | None,
+    difficulty: str,
+    paper: dict,
+    context_chunks: list[str],
+) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO exam_papers (
+                id, document_id, use_rag, topic, difficulty,
+                paper_json, context_chunks_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                exam_id,
+                document_id,
+                int(use_rag),
+                topic,
+                difficulty,
+                _dumps(paper),
+                _dumps(context_chunks),
+                _now(),
+            ),
+        )
+
+
+def get_exam_paper(exam_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM exam_papers WHERE id = ?",
+            (exam_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "doc_id": row["document_id"],
+        "use_rag": bool(row["use_rag"]),
+        "topic": row["topic"],
+        "difficulty": row["difficulty"],
+        "paper": _loads(row["paper_json"]),
         "context_chunks": _loads(row["context_chunks_json"]),
         "created_at": row["created_at"],
     }

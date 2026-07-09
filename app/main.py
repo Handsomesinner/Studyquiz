@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import coverage, generator, grounding, pdf_processor, store
+from . import coverage, exam_generator, generator, grounding, pdf_processor, store
 from .retriever import BM25Retriever
 
 app = FastAPI(title="StudyQuiz")
@@ -441,3 +441,109 @@ def evaluation_summary():
             "options_unique_rate": bucket["options_unique"] / n,
         }
     return {"by_condition": out}
+
+
+# ---------------------------------------------------------------------------
+# Exam Quiz — Nigerian-style theory / written examination papers
+# ---------------------------------------------------------------------------
+
+
+class ExamRequest(BaseModel):
+    document_id: str
+    num_questions: int = 4  # major questions (QUESTION ONE …)
+    topic: str | None = None
+    use_rag: bool = True
+    difficulty: str = "medium"
+    course_code: str | None = None
+    course_title: str | None = None
+    time_allowed: str = "2 Hrs."
+
+
+@app.post("/api/exam")
+def create_exam(req: ExamRequest):
+    """Generate a theory exam paper for written-exam practice."""
+    doc = store.get_document(req.document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found. Upload it again.")
+
+    num_questions = max(2, min(req.num_questions, 6))
+    retriever: BM25Retriever = doc["retriever"]
+    # Use broader coverage than MCQ — written papers span more of the syllabus.
+    plan = coverage.plan_retrieval(
+        retriever,
+        num_questions=max(num_questions * 2, 8),
+        topic=req.topic,
+        use_rag=req.use_rag,
+    )
+    context_chunks = (
+        [doc["chunks"][i] for i in plan.chunk_indices] if plan.chunk_indices else []
+    )
+    # Cap context size for the single exam generation call.
+    if len(context_chunks) > 14:
+        step = len(context_chunks) / 14
+        context_chunks = [
+            context_chunks[int(i * step)] for i in range(14)
+        ]
+
+    try:
+        paper = exam_generator.generate_exam_paper(
+            num_questions=num_questions,
+            doc_title=doc["title"] or "Lecture material",
+            context_chunks=context_chunks,
+            topic=req.topic,
+            use_rag=req.use_rag,
+            difficulty=req.difficulty,
+            course_code=req.course_code,
+            course_title=req.course_title,
+            time_allowed=req.time_allowed or "2 Hrs.",
+        )
+    except exam_generator.GenerationError as e:
+        raise HTTPException(503, str(e))
+
+    exam_id = uuid.uuid4().hex[:12]
+    paper_dict = paper.model_dump()
+    store.save_exam_paper(
+        exam_id=exam_id,
+        document_id=req.document_id,
+        use_rag=req.use_rag,
+        topic=req.topic,
+        difficulty=generator._normalize_difficulty(req.difficulty),
+        paper=paper_dict,
+        context_chunks=context_chunks,
+    )
+
+    total_marks = exam_generator.paper_total_marks(paper)
+    return {
+        "exam_id": exam_id,
+        "mode": "exam",
+        "difficulty": generator._normalize_difficulty(req.difficulty),
+        "use_rag": req.use_rag,
+        "total_marks": total_marks,
+        "retrieval": plan.to_dict(),
+        "paper": paper_dict,
+        # Guides are included so the client can reveal them for revision;
+        # they are study aids, not auto-grading keys like MCQ answers.
+    }
+
+
+@app.get("/api/exam/{exam_id}")
+def get_exam(exam_id: str):
+    row = store.get_exam_paper(exam_id)
+    if row is None:
+        raise HTTPException(404, "Exam paper not found.")
+    paper = row["paper"]
+    # Recompute total if needed
+    total = 0.0
+    for q in paper.get("questions") or []:
+        for p in q.get("parts") or []:
+            total += float(p.get("marks") or 0)
+    return {
+        "exam_id": exam_id,
+        "mode": "exam",
+        "difficulty": row["difficulty"],
+        "use_rag": row["use_rag"],
+        "topic": row["topic"],
+        "total_marks": total,
+        "paper": paper,
+        "created_at": row["created_at"],
+    }
