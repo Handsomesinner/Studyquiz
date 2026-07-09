@@ -174,22 +174,34 @@ function pct(rate) {
   return `${Math.round((rate || 0) * 100)}%`;
 }
 
-function renderGroundingMetrics(g, el) {
-  if (!g) { el.classList.add("hidden"); return; }
-  const pre = g.pre_filter || {};
-  const served = g.served || {};
-  const mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
-  const lines = [
-    `<strong>Grounding check</strong> — ${mode}`,
-    `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found in the document (${pct(pre.quote_in_source_rate)} quote-in-source rate)`,
-  ];
-  if (g.filtered_out > 0) {
-    lines.push(`Filtered out <strong>${g.filtered_out}</strong> unverified question(s); serving ${served.total_questions ?? 0}.`);
-  } else if (served.total_questions != null) {
-    lines.push(`Serving ${served.total_questions} question(s).`);
+function renderGroundingMetrics(g, el, retrieval) {
+  if (!g && !retrieval) { el.classList.add("hidden"); return; }
+  const lines = [];
+  if (retrieval && retrieval.strategy !== "baseline_none") {
+    lines.push(
+      `<strong>Retrieval coverage</strong> — strategy <code>${retrieval.strategy}</code>`,
+      `Used <strong>${(retrieval.chunk_indices || []).length}</strong> of ${retrieval.num_document_chunks} chunks ` +
+        `(top_k=${retrieval.top_k}) across <strong>${retrieval.num_batches}</strong> section batch(es).`
+    );
+  } else if (retrieval && retrieval.strategy === "baseline_none") {
+    lines.push(`<strong>Retrieval</strong> — baseline mode (no document chunks).`);
   }
-  if (pre.use_rag === false) {
-    lines.push(`Baseline mode: empty-quote rate ${pct(pre.empty_quote_rate)} (expected high).`);
+  if (g) {
+    const pre = g.pre_filter || {};
+    const served = g.served || {};
+    const mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
+    lines.push(
+      `<strong>Grounding check</strong> — ${mode}`,
+      `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found in the document (${pct(pre.quote_in_source_rate)} quote-in-source rate)`
+    );
+    if (g.filtered_out > 0) {
+      lines.push(`Filtered out <strong>${g.filtered_out}</strong> unverified question(s); serving ${served.total_questions ?? 0}.`);
+    } else if (served.total_questions != null) {
+      lines.push(`Serving ${served.total_questions} question(s).`);
+    }
+    if (pre.use_rag === false) {
+      lines.push(`Baseline mode: empty-quote rate ${pct(pre.empty_quote_rate)} (expected high).`);
+    }
   }
   el.innerHTML = lines.join("<br>");
   el.classList.remove("hidden");
@@ -255,7 +267,7 @@ $("generate-btn").onclick = async () => {
     quizId = quiz.quiz_id;
     questionCount = quiz.questions.length;
     renderQuiz(quiz.questions);
-    renderGroundingMetrics(quiz.grounding, $("grounding-metrics"));
+    renderGroundingMetrics(quiz.grounding, $("grounding-metrics"), quiz.retrieval);
     status.textContent = "";
     $("result-card").classList.add("hidden");
     $("quiz-card").classList.remove("hidden");

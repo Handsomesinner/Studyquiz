@@ -75,10 +75,38 @@ class BM25Retriever:
         return scores[:top_k]
 
     def spread_sample(self, top_k: int = 6) -> list[tuple[int, float]]:
-        """Fallback when no topic is given: sample chunks evenly across the
-        document so the quiz covers the whole material rather than one page."""
+        """Sample chunks evenly across the document (unique indices).
+
+        Used when no topic is given, or as a fallback when BM25 finds nothing.
+        Indices are spaced from first to last chunk so long documents are not
+        collapsed onto the opening pages.
+        """
         n = len(self.chunks)
+        if n == 0 or top_k <= 0:
+            return []
         if n <= top_k:
             return [(i, 0.0) for i in range(n)]
-        step = n / top_k
-        return [(round(i * step), 0.0) for i in range(top_k)]
+        # Inclusive endpoints; avoid round() collisions that duplicate indices.
+        indices: list[int] = []
+        for i in range(top_k):
+            idx = int(round(i * (n - 1) / (top_k - 1)))
+            indices.append(idx)
+        # Repair any residual duplicates by shifting forward.
+        seen: set[int] = set()
+        unique: list[int] = []
+        for idx in indices:
+            while idx in seen and idx + 1 < n:
+                idx += 1
+            if idx not in seen:
+                seen.add(idx)
+                unique.append(idx)
+        # If still short, fill gaps from unused indices
+        if len(unique) < top_k:
+            for i in range(n):
+                if i not in seen:
+                    unique.append(i)
+                    seen.add(i)
+                if len(unique) >= top_k:
+                    break
+        unique.sort()
+        return [(i, 0.0) for i in unique[:top_k]]

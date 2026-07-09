@@ -33,6 +33,10 @@ evaluation chapter to compare grounded vs ungrounded question quality.
   `app/retriever.py` so the mathematics can be presented in the report. The
   class exposes the same interface an embedding + vector-database retriever
   (e.g. ChromaDB) would, so that upgrade is a drop-in replacement.
+- **Coverage planning** — `coverage.py` scales how many chunks are retrieved
+  with document length and quiz size (not a fixed top_k=6), diversifies topic
+  hits so neighbouring windows are not over-sampled, and for long selections
+  **batches generation by section** so questions span the whole lecture.
 - **Generation** — Claude (`claude-haiku-4-5`) receives the retrieved chunks
   and returns questions as **structured output** validated against a Pydantic
   schema — guaranteed parseable JSON, each question carrying a supporting

@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import generator, grounding, pdf_processor, store
+from . import coverage, generator, grounding, pdf_processor, store
 from .retriever import BM25Retriever
 
 app = FastAPI(title="StudyQuiz")
@@ -170,23 +170,26 @@ def create_quiz(req: QuizRequest):
         raise HTTPException(404, "Document not found. Upload it again.")
     num_questions = max(1, min(req.num_questions, 15))
 
-    # Retrieval: topic query if given, otherwise sample evenly across the
-    # document so the quiz covers all of the material.
+    # Retrieval plan: scale top_k with doc size / num_questions, diversify
+    # topic hits, and batch long selections for section-wise generation.
     retriever: BM25Retriever = doc["retriever"]
-    if req.topic:
-        hits = retriever.search(req.topic, top_k=6)
-        if not hits:
-            hits = retriever.spread_sample(top_k=6)
-    else:
-        hits = retriever.spread_sample(top_k=6)
-    context_chunks = [doc["chunks"][i] for i, _score in hits]
+    plan = coverage.plan_retrieval(
+        retriever,
+        num_questions=num_questions,
+        topic=req.topic,
+        use_rag=req.use_rag,
+    )
+    context_batches = coverage.context_batches_from_plan(plan, doc["chunks"])
+    # Flat list still stored for evaluation / debugging.
+    context_chunks = [doc["chunks"][i] for i in plan.chunk_indices] if plan.chunk_indices else []
     source_text = doc.get("text") or "\n\n".join(doc["chunks"])
 
     try:
-        quiz = generator.generate_quiz(
+        quiz = generator.generate_quiz_from_batches(
             num_questions=num_questions,
             doc_title=doc["title"],
-            context_chunks=context_chunks,
+            context_batches=context_batches,
+            questions_per_batch=plan.questions_per_batch,
             topic=req.topic,
             use_rag=req.use_rag,
         )
@@ -264,6 +267,7 @@ def create_quiz(req: QuizRequest):
             {"index": i, "question": q.question, "options": q.options}
             for i, q in enumerate(served_questions)
         ],
+        "retrieval": plan.to_dict(),
         "grounding": {
             "require_grounding": req.require_grounding and req.use_rag,
             "filtered_out": filtered_out,
