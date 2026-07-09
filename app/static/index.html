@@ -8,7 +8,7 @@
   :root {
     --ink: #1e2430; --muted: #6b7280; --paper: #f6f4ee; --card: #ffffff;
     --accent: #0d6e5f; --accent-soft: #e2f0ed; --wrong: #b3423a; --wrong-soft: #f9e8e6;
-    --line: #e3ded3;
+    --line: #e3ded3; --warn: #8a6d1d; --warn-soft: #f5efd8;
   }
   * { box-sizing: border-box; margin: 0; }
   body { font-family: Georgia, "Times New Roman", serif; background: var(--paper); color: var(--ink); line-height: 1.55; }
@@ -28,9 +28,13 @@
   button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 0.6rem 1.3rem; font-size: 0.95rem; font-family: system-ui, sans-serif; cursor: pointer; margin-top: 1rem; }
   button:disabled { opacity: 0.5; cursor: wait; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  .toggle { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.9rem; font-family: system-ui, sans-serif; font-size: 0.85rem; color: var(--muted); }
+  a.button-link { display: inline-block; background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 0.55rem 1.1rem; font-size: 0.9rem; font-family: system-ui, sans-serif; text-decoration: none; margin-top: 0.75rem; margin-right: 0.5rem; }
+  .toggle { display: flex; align-items: flex-start; gap: 0.5rem; margin-top: 0.9rem; font-family: system-ui, sans-serif; font-size: 0.85rem; color: var(--muted); }
+  .toggle label { margin: 0; color: var(--muted); }
   .status { font-family: system-ui, sans-serif; font-size: 0.85rem; margin-top: 0.8rem; color: var(--muted); }
   .status.error { color: var(--wrong); }
+  .metrics { font-family: system-ui, sans-serif; font-size: 0.85rem; background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 0.75rem 0.9rem; margin-top: 0.9rem; line-height: 1.45; }
+  .metrics strong { color: var(--ink); }
   .question { border-top: 1px solid var(--line); padding: 1.1rem 0; }
   .question:first-of-type { border-top: 0; }
   .question p.q { font-weight: bold; margin-bottom: 0.6rem; }
@@ -41,7 +45,12 @@
   .option.wrong { background: var(--wrong-soft); border-color: var(--wrong); }
   .explain { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; padding-left: 0.7rem; border-left: 3px solid var(--line); }
   .explain q { font-style: italic; }
+  .badge { display: inline-block; font-family: system-ui, sans-serif; font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.12rem 0.55rem; margin-top: 0.45rem; }
+  .badge.ok { background: var(--accent-soft); color: var(--accent); }
+  .badge.bad { background: var(--wrong-soft); color: var(--wrong); }
+  .badge.base { background: var(--warn-soft); color: var(--warn); }
   .scoreband { text-align: center; padding: 1rem; font-size: 1.3rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
   .hidden { display: none; }
 </style>
 </head>
@@ -75,10 +84,15 @@
     </div>
     <div class="toggle">
       <input type="checkbox" id="use-rag" checked />
-      <label for="use-rag" style="margin:0">Ground questions in the document (RAG) — untick for the plain-LLM baseline</label>
+      <label for="use-rag">Ground questions in the document (RAG) — untick for the plain-LLM baseline</label>
+    </div>
+    <div class="toggle">
+      <input type="checkbox" id="require-grounding" checked />
+      <label for="require-grounding">Require verified source quotes (drop questions whose quote is not in the document)</label>
     </div>
     <button id="generate-btn">Generate quiz</button>
     <div class="status" id="generate-status"></div>
+    <div class="metrics hidden" id="grounding-metrics"></div>
   </section>
 
   <section class="card hidden" id="quiz-card">
@@ -90,7 +104,12 @@
 
   <section class="card hidden" id="result-card">
     <div class="scoreband" id="scoreband"></div>
-    <button class="secondary" id="again-btn">Generate another quiz</button>
+    <div class="metrics hidden" id="result-grounding"></div>
+    <div class="actions">
+      <button class="secondary" id="again-btn">Generate another quiz</button>
+      <a class="button-link" id="export-csv" href="/api/evaluation/export">Download evaluation CSV</a>
+      <a class="button-link" id="eval-json" href="#" target="_blank">View quiz evaluation JSON</a>
+    </div>
   </section>
 
 </main>
@@ -99,12 +118,54 @@ let docId = null, quizId = null, questionCount = 0;
 
 const $ = (id) => document.getElementById(id);
 
+function errorDetail(body, status) {
+  const d = body && body.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    return d.map((x) => (x && x.msg) || JSON.stringify(x)).join("; ");
+  }
+  if (d && typeof d === "object") return JSON.stringify(d);
+  return `Request failed (${status})`;
+}
+
 async function api(path, options) {
   const res = await fetch(path, options);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+  if (!res.ok) throw new Error(errorDetail(body, res.status));
   return body;
 }
+
+function pct(rate) {
+  return `${Math.round((rate || 0) * 100)}%`;
+}
+
+function renderGroundingMetrics(g, el) {
+  if (!g) { el.classList.add("hidden"); return; }
+  const pre = g.pre_filter || {};
+  const served = g.served || {};
+  const mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
+  const lines = [
+    `<strong>Grounding check</strong> — ${mode}`,
+    `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found in the document (${pct(pre.quote_in_source_rate)} quote-in-source rate)`,
+  ];
+  if (g.filtered_out > 0) {
+    lines.push(`Filtered out <strong>${g.filtered_out}</strong> unverified question(s); serving ${served.total_questions ?? 0}.`);
+  } else if (served.total_questions != null) {
+    lines.push(`Serving ${served.total_questions} question(s).`);
+  }
+  if (pre.use_rag === false) {
+    lines.push(`Baseline mode: empty-quote rate ${pct(pre.empty_quote_rate)} (expected high).`);
+  }
+  el.innerHTML = lines.join("<br>");
+  el.classList.remove("hidden");
+}
+
+$("use-rag").onchange = () => {
+  const rag = $("use-rag").checked;
+  $("require-grounding").disabled = !rag;
+  if (!rag) $("require-grounding").checked = false;
+  else $("require-grounding").checked = true;
+};
 
 $("upload-btn").onclick = async () => {
   const file = $("file").files[0];
@@ -128,6 +189,7 @@ $("generate-btn").onclick = async () => {
   const status = $("generate-status");
   $("generate-btn").disabled = true;
   status.className = "status"; status.textContent = "Generating questions with Claude — this takes a few seconds…";
+  $("grounding-metrics").classList.add("hidden");
   try {
     const quiz = await api("/api/quiz", {
       method: "POST",
@@ -137,14 +199,17 @@ $("generate-btn").onclick = async () => {
         num_questions: parseInt($("num").value, 10) || 5,
         topic: $("topic").value.trim() || null,
         use_rag: $("use-rag").checked,
+        require_grounding: $("use-rag").checked && $("require-grounding").checked,
       }),
     });
     quizId = quiz.quiz_id;
     questionCount = quiz.questions.length;
     renderQuiz(quiz.questions);
+    renderGroundingMetrics(quiz.grounding, $("grounding-metrics"));
     status.textContent = "";
     $("result-card").classList.add("hidden");
     $("quiz-card").classList.remove("hidden");
+    $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
@@ -214,10 +279,37 @@ function showResults(result) {
       explain.appendChild(document.createTextNode("From the material: "));
       explain.appendChild(q);
     }
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    if (r.grounded) {
+      badge.classList.add("ok");
+      badge.textContent = "Verified in document";
+    } else if (r.match_type === "baseline_empty" || r.match_type === "empty_quote") {
+      badge.classList.add("base");
+      badge.textContent = "Baseline (no source quote)";
+    } else {
+      badge.classList.add("bad");
+      badge.textContent = "Quote not found in document";
+    }
+    explain.appendChild(document.createElement("br"));
+    explain.appendChild(badge);
     qDiv.appendChild(explain);
   });
   $("submit-btn").classList.add("hidden");
   $("scoreband").textContent = `You scored ${result.score} / ${result.total}`;
+  const rg = $("result-grounding");
+  if (result.grounding) {
+    const m = result.grounding;
+    rg.innerHTML =
+      `<strong>Automatic metrics</strong><br>` +
+      `Quote-in-source rate: <strong>${pct(m.quote_in_source_rate)}</strong> ` +
+      `(${m.grounded_count}/${m.total_questions}) · ` +
+      `Unique options: ${pct(m.options_unique_rate)}`;
+    rg.classList.remove("hidden");
+  } else {
+    rg.classList.add("hidden");
+  }
+  $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
   $("result-card").classList.remove("hidden");
   $("result-card").scrollIntoView({ behavior: "smooth" });
 }

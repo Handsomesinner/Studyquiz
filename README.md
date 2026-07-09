@@ -37,6 +37,11 @@ evaluation chapter to compare grounded vs ungrounded question quality.
   and returns questions as **structured output** validated against a Pydantic
   schema — guaranteed parseable JSON, each question carrying a supporting
   quote from the source material.
+- **Grounding validation** — `grounding.py` checks each `source_quote` against
+  the full document text (exact + punctuation-normalised match). Questions
+  whose quote cannot be found are flagged; in default RAG mode they are
+  dropped so students only see verified items. The **quote-in-source rate**
+  is an automatic metric for the evaluation chapter (RAG vs baseline).
 - **Grading** — answers are kept server-side; the browser never sees the
   correct option until the quiz is submitted.
 
@@ -60,6 +65,28 @@ plain-LLM baseline for the same document. Collect quizzes from both conditions
 and have raters score each question for *relevance*, *correctness*, and
 *answerability from the source* — that comparison is the research contribution.
 
+### Automatic metrics (no human raters required)
+
+After each quiz is generated, StudyQuiz records:
+
+| Metric | Meaning |
+|---|---|
+| **quote_in_source_rate** | Fraction of questions whose `source_quote` appears in the document |
+| **options_unique_rate** | Fraction of questions with four distinct options |
+| **match_type** | `exact` / `normalized` / `not_found` / `empty_quote` / `baseline_empty` |
+
+Use these endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/quiz/{id}/evaluation` | Per-question grounding detail for one quiz |
+| `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline quote-in-source rates |
+| `GET` | `/api/evaluation/export` | Download all rows as **CSV** for tables/graphs |
+
+Default RAG generation sets `require_grounding=true` (unverified questions are
+dropped). Untick that option in the UI to keep every model question and measure
+the raw failure rate — useful for ablation tables.
+
 ## Scope / limitations (as stated in the proposal)
 
 - Text-based documents (PDF, Word, PowerPoint, plain text) — scanned/handwritten documents (OCR) are out of scope.
@@ -72,5 +99,17 @@ and have raters score each question for *relevance*, *correctness*, and
 |---|---|---|
 | `POST` | `/api/documents` | Upload and index a document |
 | `GET` | `/api/documents` | List indexed documents |
-| `POST` | `/api/quiz` | Generate a quiz (`document_id`, `num_questions`, `topic?`, `use_rag`) |
+| `POST` | `/api/quiz` | Generate a quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`) |
 | `POST` | `/api/quiz/{id}/submit` | Grade submitted answers |
+| `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
+| `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |
+| `GET` | `/api/evaluation/export` | CSV export of all evaluation rows |
+
+## Tests
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -q
+```
+
+Grounding tests do **not** call the Claude API.
