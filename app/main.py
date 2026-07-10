@@ -537,6 +537,11 @@ def get_exam(exam_id: str):
     for q in paper.get("questions") or []:
         for p in q.get("parts") or []:
             total += float(p.get("marks") or 0)
+    has_guides = any(
+        (p.get("guide_points") or p.get("answer_outline"))
+        for q in paper.get("questions") or []
+        for p in q.get("parts") or []
+    )
     return {
         "exam_id": exam_id,
         "mode": "exam",
@@ -546,4 +551,59 @@ def get_exam(exam_id: str):
         "total_marks": total,
         "paper": paper,
         "created_at": row["created_at"],
+        "guides_ready": has_guides,
+    }
+
+
+@app.post("/api/exam/{exam_id}/answers")
+def generate_exam_answers(exam_id: str):
+    """Generate marking scheme + model-answer outlines from the lecture notes.
+
+    Call this *after* attempting the paper on your own. Answers are grounded
+    in the uploaded document (BM25 retrieval per question) so you can self-check.
+    """
+    row = store.get_exam_paper(exam_id)
+    if row is None:
+        raise HTTPException(404, "Exam paper not found. Generate a paper first.")
+
+    doc = store.get_document(row["doc_id"])
+    if doc is None:
+        raise HTTPException(
+            404,
+            "Original document is no longer available. Re-upload the notes and "
+            "generate a new exam paper.",
+        )
+
+    try:
+        paper = exam_generator.ExamPaper.model_validate(row["paper"])
+    except Exception:
+        raise HTTPException(500, "Stored exam paper is corrupted. Generate a new one.")
+
+    try:
+        filled = exam_generator.fill_answer_guides(
+            paper,
+            doc_title=doc["title"] or "Lecture material",
+            chunks=list(doc["chunks"]),
+            retriever=doc["retriever"],
+        )
+    except exam_generator.GenerationError as e:
+        raise HTTPException(503, str(e))
+
+    paper_dict = filled.model_dump()
+    try:
+        store.update_exam_paper(exam_id, paper_dict)
+    except KeyError:
+        raise HTTPException(404, "Exam paper not found.")
+
+    total = exam_generator.paper_total_marks(filled)
+    return {
+        "exam_id": exam_id,
+        "mode": "exam",
+        "guides_ready": True,
+        "total_marks": total,
+        "paper": paper_dict,
+        "message": (
+            "Marking guides and model-answer outlines are ready. "
+            "Compare them with what you wrote — they are based on your uploaded notes."
+        ),
     }

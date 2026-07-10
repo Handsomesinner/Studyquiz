@@ -25,6 +25,7 @@ __all__ = [
     "ExamPart",
     "ExamSubPart",
     "generate_exam_paper",
+    "fill_answer_guides",
     "paper_total_marks",
     "GenerationError",
 ]
@@ -48,8 +49,9 @@ class ExamPart(BaseModel):
     prompt: str
     marks: float
     subparts: list[ExamSubPart] = Field(default_factory=list)
-    # Filled later / optional — kept empty on the fast path.
+    # Filled by fill_answer_guides after the student has attempted the paper.
     guide_points: list[str] = Field(default_factory=list)
+    answer_outline: str = ""  # short model-answer sketch from the notes
     source_quote: str = ""
 
 
@@ -397,3 +399,219 @@ def _guess_title(doc_title: str) -> str:
 
 def paper_total_marks(paper: ExamPaper) -> float:
     return sum(p.marks for q in paper.questions for p in q.parts)
+
+
+# ---------------------------------------------------------------------------
+# Answer / marking guides (run AFTER the student has practised on paper)
+# ---------------------------------------------------------------------------
+
+
+class _PartAnswer(BaseModel):
+    label: str
+    guide_points: list[str] = Field(default_factory=list)
+    answer_outline: str = ""
+    source_quote: str = ""
+
+
+class _QuestionAnswers(BaseModel):
+    parts: list[_PartAnswer]
+
+
+GUIDE_SYSTEM = (
+    "You are a university examiner preparing a marking scheme and model-answer "
+    "outline for a BSc theory paper. Base every point STRICTLY on the provided "
+    "lecture material. Do not invent facts that are not supported by the sources. "
+    "Write for a Nigerian undergraduate student revising after attempting the paper. "
+    "answer_outline: 4–8 sentences a strong student answer should cover. "
+    "guide_points: 3–6 short bullets (marking scheme style). "
+    "source_quote: short verbatim phrase from the material (or empty)."
+)
+
+
+def _context_for_question(
+    question: ExamQuestion,
+    chunks: list[str],
+    retriever,
+) -> list[str]:
+    """Retrieve the most relevant note chunks for this major question."""
+    if not chunks:
+        return []
+    # Query = question heading + all part prompts
+    bits = [question.heading or ""]
+    for p in question.parts:
+        bits.append(p.prompt)
+        for sp in p.subparts or []:
+            bits.append(sp.text)
+    query = " ".join(bits)
+    if retriever is not None:
+        hits = retriever.search(query, top_k=MAX_CHUNKS_PER_QUESTION)
+        if hits:
+            return [_trim_chunk(chunks[i]) for i, _ in hits if i < len(chunks)]
+    # Fallback: even sample
+    if len(chunks) <= MAX_CHUNKS_PER_QUESTION:
+        return [_trim_chunk(c) for c in chunks]
+    step = len(chunks) / MAX_CHUNKS_PER_QUESTION
+    return [
+        _trim_chunk(chunks[min(int(i * step), len(chunks) - 1)])
+        for i in range(MAX_CHUNKS_PER_QUESTION)
+    ]
+
+
+def _generate_answers_for_question(
+    *,
+    question: ExamQuestion,
+    doc_title: str,
+    context_chunks: list[str],
+) -> dict[str, _PartAnswer]:
+    """One Claude call → marking points + outline for every part of one QUESTION."""
+    import anthropic
+
+    parts_desc = []
+    for p in question.parts:
+        sub = ""
+        if p.subparts:
+            sub = " Sub-parts: " + "; ".join(f"{s.label}. {s.text}" for s in p.subparts)
+        parts_desc.append(
+            f"({p.label}) [{p.marks} marks] {p.prompt}{sub}"
+        )
+
+    if context_chunks:
+        sources = "\n\n".join(
+            f"[Source {i + 1}]\n{c}" for i, c in enumerate(context_chunks)
+        )
+        material = f"Lecture material from \"{doc_title}\":\n\n{sources}"
+    else:
+        material = (
+            f"No lecture extract. Use standard knowledge for \"{doc_title}\" "
+            f"and leave source_quote empty."
+        )
+
+    task = f"""Produce a marking scheme for this exam question ONLY.
+
+{question.heading} (question number {question.number})
+
+Parts:
+{chr(10).join(parts_desc)}
+
+For EACH part, return:
+- label (same letter)
+- guide_points: 3–6 bullets a marker would tick
+- answer_outline: a concise model answer (not a full essay; enough to self-check)
+- source_quote: short support from the material
+
+{material}
+"""
+
+    client = _client()
+    try:
+        response = client.messages.parse(
+            model=MODEL,
+            max_tokens=MAX_TOKENS_PER_QUESTION,
+            system=GUIDE_SYSTEM,
+            messages=[{"role": "user", "content": task}],
+            output_format=_QuestionAnswers,
+        )
+    except anthropic.AuthenticationError:
+        raise GenerationError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY.")
+    except anthropic.RateLimitError:
+        raise GenerationError("Rate limited by the Claude API. Wait a moment and try again.")
+    except anthropic.APIStatusError as e:
+        raise GenerationError(
+            f"Claude API error ({e.status_code}): {_api_error_message(e)}"
+        ) from e
+    except anthropic.APIConnectionError:
+        raise GenerationError("Could not reach the Claude API. Check your internet connection.")
+    except Exception as e:
+        raise GenerationError(f"Answer guide generation failed: {_api_error_message(e)}") from e
+
+    raw = response.parsed_output
+    if raw is None or not raw.parts:
+        raise GenerationError(
+            f"No answers returned for {question.heading}. Try again."
+        )
+
+    by_label: dict[str, _PartAnswer] = {}
+    for p in raw.parts:
+        lab = (p.label or "").strip().lower()[:3]
+        if not lab:
+            continue
+        by_label[lab] = p
+    return by_label
+
+
+def fill_answer_guides(
+    paper: ExamPaper,
+    *,
+    doc_title: str,
+    chunks: list[str],
+    retriever=None,
+) -> ExamPaper:
+    """Attach model-answer outlines + marking points to an existing paper.
+
+    Safe to call after the student has written their own answers. Runs one
+    Claude call per major question, in parallel, each grounded in BM25-retrieved
+    notes for that question.
+    """
+    if not paper.questions:
+        return paper
+
+    def work(q: ExamQuestion) -> ExamQuestion:
+        ctx = _context_for_question(q, chunks, retriever)
+        answers = _generate_answers_for_question(
+            question=q,
+            doc_title=doc_title,
+            context_chunks=ctx,
+        )
+        new_parts: list[ExamPart] = []
+        for p in q.parts:
+            key = (p.label or "").strip().lower()[:3]
+            a = answers.get(key)
+            if a is None:
+                # try first letter only
+                a = answers.get(key[:1]) if key else None
+            if a is None:
+                new_parts.append(p)
+                continue
+            new_parts.append(
+                ExamPart(
+                    label=p.label,
+                    prompt=p.prompt,
+                    marks=p.marks,
+                    subparts=p.subparts,
+                    guide_points=list(a.guide_points or [])[:8],
+                    answer_outline=(a.answer_outline or "").strip(),
+                    source_quote=(a.source_quote or p.source_quote or "").strip(),
+                )
+            )
+        return ExamQuestion(number=q.number, heading=q.heading, parts=new_parts)
+
+    updated: list[ExamQuestion | None] = [None] * len(paper.questions)
+    errors: list[str] = []
+    workers = min(len(paper.questions), 4)
+    with ThreadPoolExecutor(max_workers=workers) as pool_exec:
+        futures = {
+            pool_exec.submit(work, q): i for i, q in enumerate(paper.questions)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                updated[i] = fut.result()
+            except GenerationError as e:
+                errors.append(str(e))
+                updated[i] = paper.questions[i]
+            except Exception as e:
+                errors.append(str(e))
+                updated[i] = paper.questions[i]
+
+    paper.questions = [q for q in updated if q is not None]
+    if not any(
+        (p.guide_points or p.answer_outline)
+        for q in paper.questions
+        for p in q.parts
+    ):
+        raise GenerationError(
+            errors[0]
+            if errors
+            else "Could not generate answer guides. Try again."
+        )
+    return paper

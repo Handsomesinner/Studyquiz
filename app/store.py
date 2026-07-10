@@ -391,6 +391,17 @@ def get_exam_paper(exam_id: str) -> dict | None:
     }
 
 
+def update_exam_paper(exam_id: str, paper: dict) -> None:
+    """Overwrite the stored paper JSON (e.g. after filling answer guides)."""
+    with connection() as conn:
+        cur = conn.execute(
+            "UPDATE exam_papers SET paper_json = ? WHERE id = ?",
+            (_dumps(paper), exam_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(exam_id)
+
+
 # ---------------------------------------------------------------------------
 # Attempts (scores)
 # ---------------------------------------------------------------------------

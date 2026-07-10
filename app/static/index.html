@@ -260,10 +260,16 @@
   <section class="card hidden" id="exam-card">
     <span class="step">Step 3</span>
     <h2>Exam paper (practice)</h2>
-    <p class="hint no-print">Written-style questions like Nigerian university theory exams. Practise answering in your notebook, then reveal revision guides.</p>
+    <p class="hint no-print">
+      <strong>1.</strong> Answer the questions in your notebook (like a real exam).<br>
+      <strong>2.</strong> Then click <em>Generate answers from my notes</em> to get a marking scheme + model outline grounded in your uploaded material.<br>
+      <strong>3.</strong> Compare what you wrote with the guide (not auto-scored — theory exams are written).
+    </p>
     <div id="exam-sheet" class="exam-sheet"></div>
+    <div class="status" id="exam-answer-status"></div>
     <div class="actions no-print">
-      <button class="secondary" id="toggle-guides-btn" type="button">Show revision guides</button>
+      <button id="gen-answers-btn" type="button">Generate answers from my notes</button>
+      <button class="secondary" id="toggle-guides-btn" type="button">Show answers / marking guide</button>
       <button class="secondary" id="print-exam-btn" type="button">Print / save PDF</button>
       <button class="secondary" id="exam-again-btn" type="button">Generate another paper</button>
     </div>
@@ -549,23 +555,23 @@ async function generateExam() {
     });
     examId = exam.exam_id;
     lastExamPayload = exam;
+    guidesVisible = false;
     renderExamPaper(exam);
     renderGroundingMetrics(null, $("grounding-metrics"), exam.retrieval);
-    const extra = document.createElement("div");
-    // append total marks into metrics
     const m = $("grounding-metrics");
     const strat = (exam.retrieval && exam.retrieval.exam_strategy) || "parallel";
     m.innerHTML += `<br><strong>Exam Quiz</strong> — ${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks · strategy <code>${strat}</code>`;
     m.classList.remove("hidden");
     status.textContent = "";
+    $("exam-answer-status").textContent = "";
+    $("exam-answer-status").className = "status";
     $("quiz-card").classList.add("hidden");
     $("result-card").classList.add("hidden");
     $("exam-card").classList.remove("hidden");
-    // Guides are deferred on the fast path (keeps generation reliable).
-    $("toggle-guides-btn").textContent = exam.guides_deferred
-      ? "Revision guides (use lecture notes)"
-      : "Show revision guides";
-    $("toggle-guides-btn").disabled = !!exam.guides_deferred;
+    $("gen-answers-btn").disabled = false;
+    $("gen-answers-btn").textContent = "Generate answers from my notes";
+    $("toggle-guides-btn").disabled = true;
+    $("toggle-guides-btn").textContent = "Show answers / marking guide";
     $("exam-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
@@ -650,14 +656,20 @@ function renderExamPaper(exam) {
       }
       html += `</div><div class="marks">(${esc(marksLabel)})</div></div>`;
 
-      // Revision guide (hidden until toggled)
+      // Answer guide (hidden until generated + toggled)
       html += `<div class="exam-guide guide-block hidden">`;
-      if (part.guide_points && part.guide_points.length) {
-        html += `<strong>Revision guide</strong><ul>`;
+      const hasOutline = part.answer_outline && String(part.answer_outline).trim();
+      const hasPoints = part.guide_points && part.guide_points.length;
+      if (hasOutline) {
+        html += `<strong>Model answer outline</strong> <span style="font-weight:normal;color:var(--muted)">(from your notes)</span><p style="margin:0.35rem 0 0.5rem">${esc(part.answer_outline)}</p>`;
+      }
+      if (hasPoints) {
+        html += `<strong>Marking points</strong><ul>`;
         part.guide_points.forEach((gp) => { html += `<li>${esc(gp)}</li>`; });
         html += `</ul>`;
-      } else {
-        html += `<em>No guide points returned for this part.</em>`;
+      }
+      if (!hasOutline && !hasPoints) {
+        html += `<em>No answer guide yet. Click “Generate answers from my notes” after you attempt this part.</em>`;
       }
       if (part.source_quote) {
         html += `<div class="exam-quote">From material: “${esc(part.source_quote)}”</div>`;
@@ -668,16 +680,60 @@ function renderExamPaper(exam) {
   });
 
   sheet.innerHTML = html;
+  if (guidesVisible) {
+    document.querySelectorAll(".guide-block").forEach((el) => el.classList.remove("hidden"));
+  }
 }
 
+function paperHasGuides(paper) {
+  return (paper.questions || []).some((q) =>
+    (q.parts || []).some((p) =>
+      (p.guide_points && p.guide_points.length) || (p.answer_outline && String(p.answer_outline).trim())
+    )
+  );
+}
+
+$("gen-answers-btn").onclick = async () => {
+  if (!examId) {
+    $("exam-answer-status").textContent = "Generate an exam paper first.";
+    $("exam-answer-status").className = "status error";
+    return;
+  }
+  const st = $("exam-answer-status");
+  $("gen-answers-btn").disabled = true;
+  st.className = "status";
+  st.textContent = "Generating marking scheme from your uploaded notes — usually 15–40 seconds…";
+  try {
+    const exam = await api(`/api/exam/${examId}/answers`, { method: "POST" });
+    lastExamPayload = exam;
+    guidesVisible = true;
+    renderExamPaper(exam);
+    st.className = "status";
+    st.textContent = exam.message || "Answers ready — compare with what you wrote.";
+    $("toggle-guides-btn").disabled = false;
+    $("toggle-guides-btn").textContent = "Hide answers / marking guide";
+    $("gen-answers-btn").textContent = "Regenerate answers from notes";
+  } catch (e) {
+    st.className = "status error";
+    st.textContent = e.message;
+  } finally {
+    $("gen-answers-btn").disabled = false;
+  }
+};
+
 $("toggle-guides-btn").onclick = () => {
+  if (!lastExamPayload || !paperHasGuides(lastExamPayload.paper || {})) {
+    $("exam-answer-status").textContent = "Generate answers from your notes first.";
+    $("exam-answer-status").className = "status error";
+    return;
+  }
   guidesVisible = !guidesVisible;
   document.querySelectorAll(".guide-block").forEach((el) => {
     el.classList.toggle("hidden", !guidesVisible);
   });
   $("toggle-guides-btn").textContent = guidesVisible
-    ? "Hide revision guides"
-    : "Show revision guides";
+    ? "Hide answers / marking guide"
+    : "Show answers / marking guide";
 };
 
 $("print-exam-btn").onclick = () => window.print();
