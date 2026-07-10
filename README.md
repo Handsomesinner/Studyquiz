@@ -144,3 +144,16 @@ python -m pytest tests/ -q
 ```
 
 Grounding tests do **not** call the Claude API.
+
+## Project defense report
+
+A full viva/defense write-up is in:
+
+- [`docs/StudyQuiz_Project_Defense_Report.docx`](docs/StudyQuiz_Project_Defense_Report.docx)
+
+Regenerate after doc changes:
+
+```bash
+npm install   # once — installs `docx`
+node docs/generate_defense_report.js
+```

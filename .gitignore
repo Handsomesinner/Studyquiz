@@ -5,3 +5,7 @@ __pycache__/
 data/
 *.db
 *.db-journal
+
+# Node (report generator only)
+node_modules/
+
