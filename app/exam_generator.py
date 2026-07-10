@@ -1,27 +1,40 @@
 """Exam Quiz generation — Nigerian university theory-paper style.
 
-Unlike the MCQ study quiz, this mode produces long-form examination questions
-in the style of BSc papers (e.g. FUOYE CSC-style): QUESTION ONE / TWO with
-parts (a)(b)(c), roman sub-parts (i)(ii)(iii), and mark allocations.
-Students use it to *prepare* for written exams, not for auto-scored MCQs.
+Speed strategy:
+  - Generate each major QUESTION in its own Claude call (small JSON).
+  - Run those calls in parallel so wall-clock ≈ one question, not N.
+  - Use a lean schema (no long guide_points on the critical path).
+  - Cap / trim context chunks so prompts stay small and reliable.
+
+Quality is preserved by assigning each question a different slice of the
+document (syllabus coverage) rather than dumping the whole PDF into one call.
 """
 
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pydantic import BaseModel, Field
 
 from .generator import GenerationError, MODEL, _normalize_difficulty
 
-# Re-export for callers that only import this module.
 __all__ = [
     "ExamPaper",
     "ExamQuestion",
     "ExamPart",
     "ExamSubPart",
     "generate_exam_paper",
+    "paper_total_marks",
     "GenerationError",
+]
+
+# Per-question context budget (speed + fewer 400s).
+MAX_CHUNKS_PER_QUESTION = 6
+MAX_WORDS_PER_CHUNK = 110
+MAX_TOKENS_PER_QUESTION = 3500
+ORDINALS = [
+    "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT",
 ]
 
 
@@ -35,14 +48,14 @@ class ExamPart(BaseModel):
     prompt: str
     marks: float
     subparts: list[ExamSubPart] = Field(default_factory=list)
-    # Prep aid: bullet points a strong answer should cover (not shown until revealed).
+    # Filled later / optional — kept empty on the fast path.
     guide_points: list[str] = Field(default_factory=list)
-    source_quote: str = ""  # short support from material when RAG is on
+    source_quote: str = ""
 
 
 class ExamQuestion(BaseModel):
-    number: int  # 1, 2, 3, …
-    heading: str  # e.g. "QUESTION ONE"
+    number: int
+    heading: str
     parts: list[ExamPart]
 
 
@@ -60,46 +73,49 @@ class ExamPaper(BaseModel):
     questions: list[ExamQuestion]
 
 
+# Lean schema for a single major question (critical path — no guide essays).
+class _PartFast(BaseModel):
+    label: str
+    prompt: str
+    marks: float
+    subparts: list[ExamSubPart] = Field(default_factory=list)
+    source_quote: str = ""
+
+
+class _QuestionFast(BaseModel):
+    number: int
+    heading: str
+    parts: list[_PartFast]
+
+
 EXAM_SYSTEM_PROMPT = (
     "You are a chief examiner setting a Nigerian university undergraduate "
     "Computer Science written examination (BSc level), in the style used by "
-    "institutions such as Federal University Oye-Ekiti (FUOYE) and similar "
-    "Nigerian universities.\n\n"
-    "Paper conventions you MUST follow:\n"
-    "- Long-form theory questions, NOT multiple choice.\n"
-    "- Number major questions as QUESTION ONE, QUESTION TWO, … "
-    "(set heading accordingly; number is 1, 2, 3…).\n"
-    "- Break each major question into lettered parts (a), (b), (c), …\n"
-    "- Use roman numerals (i), (ii), (iii) for lists inside a part when the "
-    "student must discuss several items.\n"
-    "- Assign marks per part (e.g. 6 Marks, 3 Marks). Marks should be "
-    "realistic and sum sensibly (typical part 2–8 marks).\n"
-    "- Verbs: Discuss, Define, Explain, Describe, List and explain, "
-    "Compare, Give a brief discussion, With suitable examples…\n"
-    "- Compulsory-style Question One should be broader; later questions "
-    "can be more focused sections of the syllabus.\n"
-    "- Provide guide_points: 3–6 short bullets a good student answer should "
-    "mention (for revision, not wording to copy).\n"
-    "- When source material is provided, every part must be answerable from "
-    "that material; set source_quote to a short verbatim phrase from it. "
-    "If no material, leave source_quote empty.\n"
-    "- Do NOT invent university names different from what the user asks; "
-    "use the header fields the user requests."
+    "institutions such as FUOYE and similar Nigerian universities.\n\n"
+    "Rules:\n"
+    "- Long-form theory ONLY (not multiple choice).\n"
+    "- One major question only in this response (QUESTION N).\n"
+    "- Parts (a)(b)(c)… with realistic marks (2–8 each).\n"
+    "- Roman (i)(ii)(iii) only when listing several named items to discuss.\n"
+    "- Verbs: Discuss, Define, Explain, Describe, List and explain, Compare…\n"
+    "- Keep prompts concise (1–3 sentences per part).\n"
+    "- If material is provided, every part must be answerable from it; "
+    "source_quote = a short verbatim phrase (or empty if none).\n"
+    "- Do not invent extra major questions."
 )
 
 EXAM_DIFFICULTY = {
     "easy": (
-        "Difficulty EASY: favour Define / List / State / Briefly explain. "
-        "Fewer multi-part cascades; marks mostly 2–5."
+        "Difficulty EASY: Define / List / State / Briefly explain. "
+        "About 4–5 parts; marks mostly 2–5."
     ),
     "medium": (
-        "Difficulty MEDIUM: mix Discuss / Explain with examples and short "
-        "comparisons. Parts often 3–6 marks."
+        "Difficulty MEDIUM: Discuss / Explain with examples. "
+        "About 4–6 parts; marks 3–6."
     ),
     "hard": (
-        "Difficulty HARD: deeper Discuss / Critically examine / Compare and "
-        "contrast / design defence mechanisms. Multi-item roman lists and "
-        "higher mark parts (4–8)."
+        "Difficulty HARD: deeper Discuss / Compare / Critically examine. "
+        "About 5–6 parts; marks 4–8; use roman lists where useful."
     ),
 }
 
@@ -116,6 +132,168 @@ def _client():
     return anthropic.Anthropic()
 
 
+def _api_error_message(exc: Exception) -> str:
+    """Pull a useful message out of Anthropic errors (not just status code)."""
+    parts = [str(getattr(exc, "message", "") or "")]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or body
+        if isinstance(err, dict):
+            parts.append(str(err.get("message") or err.get("type") or ""))
+        else:
+            parts.append(str(err))
+    elif body:
+        parts.append(str(body)[:400])
+    text = " — ".join(p for p in parts if p).strip(" —")
+    return text or type(exc).__name__
+
+
+def _trim_chunk(text: str, max_words: int = MAX_WORDS_PER_CHUNK) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]).strip() + "…"
+
+
+def assign_chunk_slices(
+    chunks: list[str],
+    num_questions: int,
+    *,
+    per_question: int = MAX_CHUNKS_PER_QUESTION,
+) -> list[list[str]]:
+    """Give each major question a different region of the document.
+
+    Spreads coverage across long notes without sending the whole file once.
+    """
+    if num_questions <= 0:
+        return []
+    if not chunks:
+        return [[] for _ in range(num_questions)]
+
+    n = len(chunks)
+    slices: list[list[str]] = []
+    for q in range(num_questions):
+        # Segment of the document for this question
+        start = int(q * n / num_questions)
+        end = int((q + 1) * n / num_questions)
+        end = max(end, start + 1)
+        segment = chunks[start:end]
+        if len(segment) <= per_question:
+            picked = segment
+        else:
+            # Even sample within the segment
+            step = len(segment) / per_question
+            picked = [segment[min(int(i * step), len(segment) - 1)] for i in range(per_question)]
+        slices.append([_trim_chunk(c) for c in picked])
+    return slices
+
+
+def _generate_one_question(
+    *,
+    question_number: int,
+    num_questions: int,
+    doc_title: str,
+    context_chunks: list[str],
+    topic: str | None,
+    use_rag: bool,
+    difficulty: str,
+) -> ExamQuestion:
+    """One Claude call → one major QUESTION (fast path)."""
+    import anthropic
+
+    diff = _normalize_difficulty(difficulty)
+    ordinal = ORDINALS[question_number - 1] if question_number <= len(ORDINALS) else str(question_number)
+    is_first = question_number == 1
+
+    if use_rag and context_chunks:
+        sources = "\n\n".join(
+            f"[Source {i + 1}]\n{chunk}" for i, chunk in enumerate(context_chunks)
+        )
+        material = (
+            f"Base this question STRICTLY on material from \"{doc_title}\":\n\n{sources}"
+        )
+    else:
+        material = (
+            f"No extract provided. Use standard syllabus knowledge for "
+            f"\"{doc_title}\". Leave source_quote empty on every part."
+        )
+
+    role = (
+        "This is COMPULSORY QUESTION ONE — broader coverage, slightly more parts."
+        if is_first
+        else f"This is an optional question (QUESTION {ordinal}) — focused section of the syllabus."
+    )
+    part_count = "5–6" if is_first else "3–5"
+    topic_line = f"\nTheme focus if relevant: {topic}." if topic else ""
+
+    task = f"""Set exactly ONE major theory question for a BSc practice paper.
+
+{role}
+- number: {question_number}
+- heading: "QUESTION {ordinal}"
+- About {part_count} lettered parts with marks.
+- Use roman sub-parts only when listing several items to discuss.
+{EXAM_DIFFICULTY[diff]}
+{topic_line}
+
+{material}
+
+Respond with structured fields only for this single question.
+"""
+
+    client = _client()
+    try:
+        response = client.messages.parse(
+            model=MODEL,
+            max_tokens=MAX_TOKENS_PER_QUESTION,
+            system=EXAM_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": task}],
+            output_format=_QuestionFast,
+        )
+    except anthropic.AuthenticationError:
+        raise GenerationError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY.")
+    except anthropic.RateLimitError:
+        raise GenerationError("Rate limited by the Claude API. Wait a moment and try again.")
+    except anthropic.APIStatusError as e:
+        detail = _api_error_message(e)
+        raise GenerationError(
+            f"Claude API error ({e.status_code}): {detail}"
+        ) from e
+    except anthropic.APIConnectionError:
+        raise GenerationError("Could not reach the Claude API. Check your internet connection.")
+    except Exception as e:
+        raise GenerationError(f"Exam generation failed: {_api_error_message(e)}") from e
+
+    raw = response.parsed_output
+    if raw is None or not raw.parts:
+        raise GenerationError(
+            f"QUESTION {ordinal} came back empty. Try again with fewer questions."
+        )
+
+    parts: list[ExamPart] = []
+    for p in raw.parts:
+        if not (p.prompt or "").strip() or p.marks <= 0:
+            continue
+        parts.append(
+            ExamPart(
+                label=(p.label or "a").strip()[:3],
+                prompt=p.prompt.strip(),
+                marks=float(p.marks),
+                subparts=list(p.subparts or []),
+                guide_points=[],  # deferred — keeps this call small/fast
+                source_quote=(p.source_quote or "").strip(),
+            )
+        )
+    if not parts:
+        raise GenerationError(f"QUESTION {ordinal} had no valid parts. Try again.")
+
+    heading = (raw.heading or f"QUESTION {ordinal}").strip().upper()
+    if not heading.startswith("QUESTION"):
+        heading = f"QUESTION {ordinal}"
+
+    return ExamQuestion(number=question_number, heading=heading, parts=parts)
+
+
 def generate_exam_paper(
     *,
     num_questions: int,
@@ -127,118 +305,79 @@ def generate_exam_paper(
     course_code: str | None = None,
     course_title: str | None = None,
     time_allowed: str = "2 Hrs.",
+    all_document_chunks: list[str] | None = None,
 ) -> ExamPaper:
-    """Generate a full theory exam paper grounded (optionally) in lecture notes."""
-    num_questions = max(2, min(num_questions, 6))
-    diff = _normalize_difficulty(difficulty)
+    """Build a full paper by generating major questions in parallel.
 
+    ``all_document_chunks`` (preferred) is sliced across questions for coverage.
+    Falls back to ``context_chunks`` when a single pool is provided.
+    """
+    num_questions = max(2, min(num_questions, 6))
     code = (course_code or "").strip() or _guess_code(doc_title)
     title = (course_title or "").strip() or _guess_title(doc_title)
 
-    if use_rag and context_chunks:
-        sources = "\n\n".join(
-            f"[Source {i + 1}]\n{chunk}" for i, chunk in enumerate(context_chunks)
-        )
-        material_block = (
-            f"Base ALL questions STRICTLY on this lecture material from "
-            f"\"{doc_title}\". Do not examine topics absent from the sources.\n\n"
-            f"{sources}"
-        )
+    pool = all_document_chunks if all_document_chunks is not None else context_chunks
+    if use_rag:
+        slices = assign_chunk_slices(pool or [], num_questions)
     else:
-        material_block = (
-            f"No lecture extract provided. Set a realistic paper for a university "
-            f"course titled \"{doc_title}\" / \"{title}\" using standard syllabus "
-            f"knowledge for that subject. Leave every source_quote empty."
-        )
+        slices = [[] for _ in range(num_questions)]
 
-    topic_line = f"\nEmphasise this theme where possible: {topic}." if topic else ""
+    questions: list[ExamQuestion | None] = [None] * num_questions
+    errors: list[str] = []
 
-    task = f"""Set a practice BSc written examination paper.
+    # Parallel calls: wall time ≈ slowest single question.
+    workers = min(num_questions, 4)
+    with ThreadPoolExecutor(max_workers=workers) as pool_exec:
+        futures = {
+            pool_exec.submit(
+                _generate_one_question,
+                question_number=i + 1,
+                num_questions=num_questions,
+                doc_title=doc_title,
+                context_chunks=slices[i],
+                topic=topic,
+                use_rag=use_rag,
+                difficulty=difficulty,
+            ): i
+            for i in range(num_questions)
+        }
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                questions[idx] = fut.result()
+            except GenerationError as e:
+                errors.append(str(e))
+            except Exception as e:
+                errors.append(f"QUESTION {idx + 1} failed: {e}")
 
-HEADER FIELDS (use these exact values in the JSON):
-- institution: "StudyQuiz Exam Prep"
-- faculty: "Faculty of Science"
-- department: "Department of Computer Science"
-- exam_title: "BSc. Degree Examination (Practice Paper)"
-- session: "Practice Session"
-- course_code: "{code}"
-- course_title: "{title}"
-- course_unit: "2"
-- time_allowed: "{time_allowed}"
-
-INSTRUCTIONS (include these, adapt marks language if needed):
-1. Answer Question One and Any Other {max(1, num_questions - 1)} Question(s).
-2. No jotting is allowed on the Question Paper. (practice note: write in your notebook)
-3. Credit will be given for clarity, structure, and relevant examples.
-
-STRUCTURE:
-- Produce exactly {num_questions} major questions (QUESTION ONE …).
-- Question One should have more parts (about 5–7 parts) like a compulsory question.
-- Other questions: about 3–5 parts each.
-- Use roman sub-parts when asking students to cover several named items.
-- Total marks across the paper should feel like a real exam (roughly 40–70 if summing all parts shown).
-
-{EXAM_DIFFICULTY[diff]}
-{topic_line}
-
-MATERIAL:
-{material_block}
-"""
-
-    import anthropic
-
-    client = _client()
-    try:
-        response = client.messages.parse(
-            model=MODEL,
-            max_tokens=16000,
-            system=EXAM_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": task}],
-            output_format=ExamPaper,
-        )
-    except anthropic.AuthenticationError:
-        raise GenerationError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY.")
-    except anthropic.RateLimitError:
-        raise GenerationError("Rate limited by the Claude API. Wait a moment and try again.")
-    except anthropic.APIStatusError as e:
-        raise GenerationError(f"Claude API error ({e.status_code}). Try again shortly.")
-    except anthropic.APIConnectionError:
-        raise GenerationError("Could not reach the Claude API. Check your internet connection.")
-
-    paper = response.parsed_output
-    if paper is None or not paper.questions:
-        raise GenerationError("The model returned an unparseable exam paper. Try again.")
-
-    # Normalise headings / numbers
-    ordinals = [
-        "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT",
-    ]
-    cleaned: list[ExamQuestion] = []
-    for i, q in enumerate(paper.questions[:num_questions]):
-        parts = [p for p in q.parts if p.prompt.strip() and p.marks > 0]
-        if not parts:
-            continue
-        num = i + 1
-        heading = q.heading.strip() if q.heading else f"QUESTION {ordinals[i] if i < len(ordinals) else num}"
-        if not heading.upper().startswith("QUESTION"):
-            heading = f"QUESTION {ordinals[i] if i < len(ordinals) else num}"
-        cleaned.append(
-            ExamQuestion(number=num, heading=heading.upper(), parts=parts)
-        )
-
+    cleaned = [q for q in questions if q is not None]
     if not cleaned:
-        raise GenerationError("No valid exam questions were generated. Try again.")
+        raise GenerationError(
+            errors[0] if errors else "No exam questions were generated. Try again."
+        )
+    # If some failed, still return partial paper (better than total failure).
+    # Renumber for a clean paper.
+    for i, q in enumerate(cleaned):
+        ordinal = ORDINALS[i] if i < len(ORDINALS) else str(i + 1)
+        q.number = i + 1
+        q.heading = f"QUESTION {ordinal}"
 
-    paper.questions = cleaned
-    paper.course_code = code
-    paper.course_title = title
-    paper.time_allowed = time_allowed or paper.time_allowed
-    if not paper.instructions:
-        paper.instructions = [
-            f"Answer Question One and Any Other {max(1, len(cleaned) - 1)} Question(s).",
-            "No jotting is allowed on the Question Paper.",
-        ]
-    return paper
+    instructions = [
+        f"Answer Question One and Any Other {max(1, len(cleaned) - 1)} Question(s).",
+        "No jotting is allowed on the Question Paper.",
+        "Credit will be given for clarity, structure, and relevant examples.",
+    ]
+    if errors and len(cleaned) < num_questions:
+        # Soft note for the student UI (not shown on printed header by default)
+        pass
+
+    return ExamPaper(
+        course_code=code,
+        course_title=title,
+        time_allowed=time_allowed or "2 Hrs.",
+        instructions=instructions,
+        questions=cleaned,
+    )
 
 
 def _guess_code(doc_title: str) -> str:

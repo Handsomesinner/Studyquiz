@@ -450,7 +450,7 @@ def evaluation_summary():
 
 class ExamRequest(BaseModel):
     document_id: str
-    num_questions: int = 4  # major questions (QUESTION ONE …)
+    num_questions: int = 3  # major questions (QUESTION ONE …); default 3 for speed
     topic: str | None = None
     use_rag: bool = True
     difficulty: str = "medium"
@@ -461,35 +461,29 @@ class ExamRequest(BaseModel):
 
 @app.post("/api/exam")
 def create_exam(req: ExamRequest):
-    """Generate a theory exam paper for written-exam practice."""
+    """Generate a theory exam paper (parallel per-question calls for speed)."""
     doc = store.get_document(req.document_id)
     if doc is None:
         raise HTTPException(404, "Document not found. Upload it again.")
 
     num_questions = max(2, min(req.num_questions, 6))
+    all_chunks: list[str] = list(doc["chunks"])
+
+    # Lightweight retrieval metadata for the UI (coverage is via chunk slices).
     retriever: BM25Retriever = doc["retriever"]
-    # Use broader coverage than MCQ — written papers span more of the syllabus.
     plan = coverage.plan_retrieval(
         retriever,
-        num_questions=max(num_questions * 2, 8),
+        num_questions=num_questions,
         topic=req.topic,
         use_rag=req.use_rag,
     )
-    context_chunks = (
-        [doc["chunks"][i] for i in plan.chunk_indices] if plan.chunk_indices else []
-    )
-    # Cap context size for the single exam generation call.
-    if len(context_chunks) > 14:
-        step = len(context_chunks) / 14
-        context_chunks = [
-            context_chunks[int(i * step)] for i in range(14)
-        ]
 
     try:
         paper = exam_generator.generate_exam_paper(
             num_questions=num_questions,
             doc_title=doc["title"] or "Lecture material",
-            context_chunks=context_chunks,
+            context_chunks=all_chunks,
+            all_document_chunks=all_chunks,
             topic=req.topic,
             use_rag=req.use_rag,
             difficulty=req.difficulty,
@@ -502,6 +496,8 @@ def create_exam(req: ExamRequest):
 
     exam_id = uuid.uuid4().hex[:12]
     paper_dict = paper.model_dump()
+    # Store a compact sample of context used (first slice) for debugging only.
+    sample_ctx = exam_generator.assign_chunk_slices(all_chunks, 1)[0] if all_chunks else []
     store.save_exam_paper(
         exam_id=exam_id,
         document_id=req.document_id,
@@ -509,7 +505,7 @@ def create_exam(req: ExamRequest):
         topic=req.topic,
         difficulty=generator._normalize_difficulty(req.difficulty),
         paper=paper_dict,
-        context_chunks=context_chunks,
+        context_chunks=sample_ctx,
     )
 
     total_marks = exam_generator.paper_total_marks(paper)
@@ -519,10 +515,14 @@ def create_exam(req: ExamRequest):
         "difficulty": generator._normalize_difficulty(req.difficulty),
         "use_rag": req.use_rag,
         "total_marks": total_marks,
-        "retrieval": plan.to_dict(),
+        "retrieval": {
+            **plan.to_dict(),
+            "exam_strategy": "parallel_per_question",
+            "chunks_per_question": exam_generator.MAX_CHUNKS_PER_QUESTION,
+            "questions_generated": len(paper.questions),
+        },
         "paper": paper_dict,
-        # Guides are included so the client can reveal them for revision;
-        # they are study aids, not auto-grading keys like MCQ answers.
+        "guides_deferred": True,
     }
 
 

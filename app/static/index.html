@@ -313,7 +313,7 @@ function setMode(mode) {
   $("num-label").textContent = isExam ? "Number of major questions (QUESTION ONE…)" : "Number of MCQ questions";
   $("num").min = isExam ? 2 : 1;
   $("num").max = isExam ? 6 : 15;
-  $("num").value = isExam ? 4 : 5;
+  $("num").value = isExam ? 3 : 5;
   $("exam-fields").classList.toggle("hidden", !isExam);
   $("timer-field").classList.toggle("hidden", isExam);
   $("time-allowed-field").classList.toggle("hidden", !isExam);
@@ -529,7 +529,7 @@ async function generateExam() {
   const status = $("generate-status");
   $("generate-btn").disabled = true;
   status.className = "status";
-  status.textContent = "Setting a theory exam paper with Claude — this may take a bit longer…";
+  status.textContent = "Setting exam questions in parallel (faster) — usually 15–30 seconds…";
   $("grounding-metrics").classList.add("hidden");
   guidesVisible = false;
   try {
@@ -554,13 +554,18 @@ async function generateExam() {
     const extra = document.createElement("div");
     // append total marks into metrics
     const m = $("grounding-metrics");
-    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks total (all parts).`;
+    const strat = (exam.retrieval && exam.retrieval.exam_strategy) || "parallel";
+    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks · strategy <code>${strat}</code>`;
     m.classList.remove("hidden");
     status.textContent = "";
     $("quiz-card").classList.add("hidden");
     $("result-card").classList.add("hidden");
     $("exam-card").classList.remove("hidden");
-    $("toggle-guides-btn").textContent = "Show revision guides";
+    // Guides are deferred on the fast path (keeps generation reliable).
+    $("toggle-guides-btn").textContent = exam.guides_deferred
+      ? "Revision guides (use lecture notes)"
+      : "Show revision guides";
+    $("toggle-guides-btn").disabled = !!exam.guides_deferred;
     $("exam-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";

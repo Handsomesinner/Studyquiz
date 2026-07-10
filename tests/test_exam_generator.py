@@ -7,6 +7,7 @@ from app.exam_generator import (
     ExamSubPart,
     _guess_code,
     _guess_title,
+    assign_chunk_slices,
     paper_total_marks,
 )
 
@@ -49,3 +50,15 @@ def test_paper_total_marks():
         ],
     )
     assert paper_total_marks(paper) == 13
+
+
+def test_assign_chunk_slices_covers_document():
+    chunks = [f"chunk {i} " + ("word " * 50) for i in range(40)]
+    slices = assign_chunk_slices(chunks, 4, per_question=6)
+    assert len(slices) == 4
+    assert all(1 <= len(s) <= 6 for s in slices)
+    # Different regions (first chunk of Q1 before first of last Q)
+    assert slices[0][0].startswith("chunk 0")
+    assert "chunk 3" in slices[-1][0] or "chunk 3" in slices[-1][-1] or int(
+        slices[-1][0].split()[1]
+    ) >= 20
