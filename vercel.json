@@ -4,10 +4,15 @@
     {
       "src": "api/index.py",
       "use": "@vercel/python",
-      "config": { "includeFiles": ["app/**"] }
+      "config": { "includeFiles": ["app/**", "requirements.txt"] }
+    },
+    {
+      "src": "api/blob-upload.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
+    { "src": "/api/blob-upload", "dest": "api/blob-upload.js" },
     { "src": "/(.*)", "dest": "api/index.py" }
   ]
 }
