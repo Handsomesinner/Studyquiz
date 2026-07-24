@@ -113,6 +113,24 @@
   </section>
 
 </main>
+  <script type="module">
+  import { upload } from 'https://esm.sh/@vercel/blob@0.27.0/client';
+
+  window.uploadDocument = async function(file) {
+    const blob = await upload(file.name, file, {
+      access: 'public',
+      handleUploadUrl: '/api/blob-upload',
+    });
+
+    const res = await fetch('/api/documents/from-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blob_url: blob.url, filename: file.name }),
+    });
+    if (!res.ok) throw new Error('Upload failed');
+    return res.json();
+  };
+</script>
 <script>
 let docId = null, quizId = null, questionCount = 0;
 
@@ -174,9 +192,7 @@ $("upload-btn").onclick = async () => {
   $("upload-btn").disabled = true;
   status.className = "status"; status.textContent = "Uploading and indexing…";
   try {
-    const form = new FormData();
-    form.append("file", file);
-    const doc = await api("/api/documents", { method: "POST", body: form });
+const doc = await window.uploadDocument(file);
     docId = doc.id;
     status.textContent = `Indexed "${doc.title}" — ${doc.num_words.toLocaleString()} words in ${doc.num_chunks} chunks.`;
     $("options-card").classList.remove("hidden");
