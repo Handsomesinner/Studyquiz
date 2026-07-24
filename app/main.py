@@ -83,6 +83,56 @@ async def upload_document(file: UploadFile):
         "num_words": len(text.split()),
     }
 
+class DocumentFromUrl(BaseModel):
+    blob_url: str
+    filename: str
+
+
+@app.post("/api/documents/from-url")
+def upload_document_from_url(payload: DocumentFromUrl):
+    import requests
+    resp = requests.get(payload.blob_url, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(400, "Could not retrieve the uploaded file from storage.")
+    data = resp.content
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (max 20 MB).")
+    try:
+        text = pdf_processor.extract_text(payload.filename or "upload.pdf", data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception:
+        raise HTTPException(
+            400,
+            "Could not read this file. Make sure it is a valid, non-corrupted "
+            "document (PDF, Word, PowerPoint, or a text-based file).",
+        )
+
+    chunks = pdf_processor.chunk_text(text)
+    if len(chunks) == 0:
+        raise HTTPException(
+            400,
+            "No text could be extracted. Scanned/image-only documents are not "
+            "supported (OCR is outside the project scope).",
+        )
+
+    retriever = BM25Retriever()
+    retriever.index(chunks)
+
+    doc_id = uuid.uuid4().hex[:12]
+    DOCUMENTS[doc_id] = {
+        "title": payload.filename,
+        "chunks": chunks,
+        "text": text,
+        "retriever": retriever,
+    }
+    return {
+        "id": doc_id,
+        "title": payload.filename,
+        "num_chunks": len(chunks),
+        "num_words": len(text.split()),
+    }
+
 
 @app.get("/api/documents")
 def list_documents():
