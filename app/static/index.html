@@ -1135,12 +1135,31 @@ function renderMineAnswers(payload) {
   const holder = $("mine-answers");
   holder.innerHTML = "";
   const answers = payload.answers || [];
+  const summary = document.createElement("p");
+  summary.className = "hint";
+  const parsed = payload.parsed_count != null ? payload.parsed_count : answers.length;
+  const ok = payload.answered_ok != null ? payload.answered_ok : answers.length;
+  summary.textContent =
+    `Found ${parsed} question${parsed === 1 ? "" : "s"}` +
+    (payload.truncated ? ` (showing first ${payload.max_questions})` : "") +
+    ` · answered ${ok} of ${answers.length}`;
+  holder.appendChild(summary);
+
   answers.forEach((a, i) => {
     const card = document.createElement("div");
     card.className = "answer-card";
     const h = document.createElement("h3");
     h.textContent = `${i + 1}. ${a.question || ""}`;
     card.appendChild(h);
+    if (a.error) {
+      const err = document.createElement("div");
+      err.className = "status error";
+      err.style.marginTop = "0.5rem";
+      err.textContent = "Could not generate this answer: " + a.error;
+      card.appendChild(err);
+      holder.appendChild(card);
+      return;
+    }
     if (a.notes_cover_question === false) {
       const w = document.createElement("div");
       w.className = "weak";

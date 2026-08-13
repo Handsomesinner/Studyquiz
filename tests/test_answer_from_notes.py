@@ -44,3 +44,21 @@ def test_parse_dedupes():
 def test_parse_empty():
     assert parse_questions("") == []
     assert parse_questions("   \n  ") == []
+
+
+def test_parse_lettered_parts():
+    text = """
+a) Discuss DOS attacks.
+b) Explain DNS poisoning.
+c) What is cross-site scripting?
+d) Define industrial espionage.
+e) How does SSL protect users?
+"""
+    qs = parse_questions(text)
+    assert len(qs) >= 5
+
+
+def test_parse_many_numbered():
+    lines = [f"{i}. Question number {i} about operating systems?" for i in range(1, 11)]
+    qs = parse_questions("\n".join(lines))
+    assert len(qs) == 10

@@ -9,77 +9,86 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 from .generator import MODEL, GenerationError, _client
 from .retriever import BM25Retriever
 
-MAX_QUESTIONS = 15
+MAX_QUESTIONS = 20
 TOP_K_CHUNKS = 6
 MAX_WORDS_PER_CHUNK = 140
 
-# Split pasted/file text into individual questions.
-_Q_START = re.compile(
-    r"(?m)^(?:\s*(?:Q(?:uestion)?\s*)?(\d+)[\.\)\:]\s+|(?:Question\s+(\d+)\s*[:.\-–—]\s*))",
+# Numbered: 1.  1)  1:  Q1.  Question 1:
+_NUM_START = re.compile(
+    r"(?m)^\s*(?:Q(?:uestion)?\s*)?(\d{1,3})[\.\)\:]\s+",
+    re.IGNORECASE,
+)
+_QUESTION_N = re.compile(
+    r"(?m)^\s*Question\s+(\d{1,3})\s*[:.\-–—]\s*",
+    re.IGNORECASE,
+)
+# Lettered parts often used as separate items: a) b) (a) (b) i. ii.
+_LETTER_START = re.compile(
+    r"(?m)^\s*[\(\[]?([a-z]|[ivx]{1,4})[\)\].:]\s+",
     re.IGNORECASE,
 )
 
 
 class NoteAnswer(BaseModel):
     question: str
-    outline: list[str] = Field(default_factory=list)
+    outline: List[str] = Field(default_factory=list)
     full_answer: str = ""
-    source_quotes: list[str] = Field(default_factory=list)
+    source_quotes: List[str] = Field(default_factory=list)
     notes_cover_question: bool = True
+    error: Optional[str] = None  # set when this question failed to generate
 
 
 class _AnswerOut(BaseModel):
-    outline: list[str] = Field(default_factory=list)
+    outline: List[str] = Field(default_factory=list)
     full_answer: str = ""
-    source_quotes: list[str] = Field(default_factory=list)
+    source_quotes: List[str] = Field(default_factory=list)
     notes_cover_question: bool = True
 
 
-def parse_questions(text: str) -> list[str]:
-    """Split free-form past-question text into individual questions."""
+def parse_questions(text: str) -> List[str]:
+    """Split free-form past-question text into individual questions.
+
+    Supports:
+    - 1. / 1) / Q1. / Question 1:
+    - a) / (b) / i. lettered or roman lines (when no numbers)
+    - blank-line separated blocks
+    - plain one-question-per-line lists
+    """
     if not text or not text.strip():
         return []
 
     raw = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    # Normalise fancy bullets
     raw = re.sub(r"[•●▪]", "-", raw)
 
-    parts: list[str] = []
-    matches = list(_Q_START.finditer(raw))
-    if matches:
-        for i, m in enumerate(matches):
-            start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-            body = raw[start:end].strip()
-            # Include leading number for clarity when useful
-            num = m.group(1) or m.group(2)
-            q = body
-            if num and not body.lower().startswith("question"):
-                q = body
-            if q:
-                parts.append(_clean_question(q))
-    else:
-        # Blank-line separated blocks, else non-empty lines
+    parts = _split_by_pattern(raw, _NUM_START)
+    if len(parts) < 2:
+        parts = _split_by_pattern(raw, _QUESTION_N)
+    if len(parts) < 2:
+        # Only use lettered split if we see several lettered starts
+        letter_hits = list(_LETTER_START.finditer(raw))
+        if len(letter_hits) >= 2:
+            parts = _split_by_pattern(raw, _LETTER_START)
+    if len(parts) < 2:
         blocks = re.split(r"\n\s*\n+", raw)
         if len(blocks) > 1:
-            parts = [_clean_question(b) for b in blocks if _clean_question(b)]
+            parts = [_clean_question(b) for b in blocks]
         else:
-            parts = [
-                _clean_question(line)
-                for line in raw.split("\n")
-                if _clean_question(line) and len(_clean_question(line)) > 8
-            ]
+            parts = [_clean_question(line) for line in raw.split("\n")]
 
-    # Deduplicate (case-insensitive)
+    # Deduplicate (case-insensitive), drop empties
     seen: set[str] = set()
     out: list[str] = []
     for q in parts:
+        q = _clean_question(q)
+        if not q:
+            continue
         key = re.sub(r"\s+", " ", q.lower())
         if key in seen:
             continue
@@ -88,9 +97,26 @@ def parse_questions(text: str) -> list[str]:
     return out
 
 
+def _split_by_pattern(raw: str, pattern: re.Pattern) -> list[str]:
+    matches = list(pattern.finditer(raw))
+    if not matches:
+        return []
+    parts: list[str] = []
+    # Text before first marker (if long enough) as its own question
+    head = raw[: matches[0].start()].strip()
+    if head and len(head) > 12:
+        parts.append(head)
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        body = raw[start:end].strip()
+        if body:
+            parts.append(body)
+    return parts
+
+
 def _clean_question(s: str) -> str:
     s = re.sub(r"\s+", " ", (s or "").strip())
-    # Drop pure marks lines
     if re.fullmatch(r"[\d\s\.\(\)marksMarks]+", s):
         return ""
     if len(s) < 8:
@@ -171,6 +197,7 @@ Rules:
             x.strip() for x in (parsed.source_quotes or []) if x and str(x).strip()
         ][:4],
         notes_cover_question=bool(parsed.notes_cover_question),
+        error=None,
     )
 
 
@@ -181,7 +208,11 @@ def answer_questions(
     retriever: BM25Retriever,
     doc_title: str,
 ) -> list[NoteAnswer]:
-    """Answer each question in parallel using BM25-selected note chunks."""
+    """Answer each question in parallel using BM25-selected note chunks.
+
+    Always returns one entry per input question (failed ones include ``error``)
+    so the UI never silently drops items.
+    """
     if not questions:
         raise GenerationError("No questions provided. Paste or upload some questions.")
 
@@ -193,7 +224,6 @@ def answer_questions(
         if hits:
             ctx = [_trim(chunks[idx]) for idx, _ in hits if idx < len(chunks)]
         else:
-            # Even sample fallback
             if not chunks:
                 ctx = []
             elif len(chunks) <= TOP_K_CHUNKS:
@@ -207,21 +237,48 @@ def answer_questions(
         return i, _answer_one(question=q, chunks=ctx, doc_title=doc_title)
 
     workers = min(len(qs), 4)
-    errors: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(work, i, q): i for i, q in enumerate(qs)}
         for fut in as_completed(futs):
+            i = futs[fut]
+            q = qs[i]
             try:
-                i, ans = fut.result()
-                results[i] = ans
+                idx, ans = fut.result()
+                results[idx] = ans
             except GenerationError as e:
-                errors.append(str(e))
+                results[i] = NoteAnswer(
+                    question=q,
+                    outline=[],
+                    full_answer="",
+                    source_quotes=[],
+                    notes_cover_question=False,
+                    error=str(e),
+                )
             except Exception as e:
-                errors.append(str(e))
+                results[i] = NoteAnswer(
+                    question=q,
+                    outline=[],
+                    full_answer="",
+                    source_quotes=[],
+                    notes_cover_question=False,
+                    error=str(e),
+                )
 
-    answers = [a for a in results if a is not None]
-    if not answers:
-        raise GenerationError(
-            errors[0] if errors else "Could not generate any answers. Try again."
+    answers = [
+        r
+        if r is not None
+        else NoteAnswer(
+            question=qs[i],
+            outline=[],
+            full_answer="",
+            notes_cover_question=False,
+            error="No answer was generated for this question.",
         )
+        for i, r in enumerate(results)
+    ]
+
+    # If every single one failed with the same generation config issue, surface it
+    if all(a.error for a in answers):
+        raise GenerationError(answers[0].error or "Could not generate any answers.")
+
     return answers

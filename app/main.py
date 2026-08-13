@@ -841,10 +841,13 @@ async def answer_from_notes_endpoint(request: Request):
         raise HTTPException(
             400,
             "No questions found. Paste questions in the text box and/or upload a "
-            "questions file (PDF, Word, or text).",
+            "questions file (PDF, Word, or text). Tip: number them 1. 2. 3. "
+            "or put a blank line between each question.",
         )
 
-    if len(questions) > answer_from_notes.MAX_QUESTIONS:
+    parsed_count = len(questions)
+    truncated = parsed_count > answer_from_notes.MAX_QUESTIONS
+    if truncated:
         questions = questions[: answer_from_notes.MAX_QUESTIONS]
 
     try:
@@ -857,12 +860,15 @@ async def answer_from_notes_endpoint(request: Request):
     except generator.GenerationError as e:
         raise HTTPException(503, str(e))
 
+    ok_count = sum(1 for a in answers if not a.error)
     return {
         "mode": "my_questions",
         "document_id": document_id,
         "document_title": doc["title"],
+        "parsed_count": parsed_count,
         "question_count": len(answers),
-        "truncated": len(questions) > answer_from_notes.MAX_QUESTIONS,
+        "answered_ok": ok_count,
+        "truncated": truncated,
         "max_questions": answer_from_notes.MAX_QUESTIONS,
         "answers": [a.model_dump() for a in answers],
     }
