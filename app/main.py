@@ -26,7 +26,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import coverage, exam_generator, generator, grounding, pdf_processor, store
+from . import (
+    answer_from_notes,
+    coverage,
+    exam_generator,
+    generator,
+    grounding,
+    pdf_processor,
+    store,
+)
 from .retriever import BM25Retriever
 
 app = FastAPI(title="StudyQuiz")
@@ -743,4 +751,118 @@ def generate_exam_answers(exam_id: str):
             "Marking guides and model-answer outlines are ready. "
             "Compare them with what you wrote — they are based on your uploaded notes."
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# My questions — user-supplied questions, answers from uploaded notes
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/answer-from-notes")
+async def answer_from_notes_endpoint(request: Request):
+    """Answer the student's own questions using retrieved lecture notes.
+
+    Accepts JSON:
+      { "document_id", "questions_text"? , "questions"?: ["..."] }
+    or multipart form:
+      document_id, questions_text?, file? (questions file PDF/DOCX/txt)
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    document_id = ""
+    questions_text = ""
+    file_bytes: bytes | None = None
+    file_name = ""
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON body.")
+        document_id = str(body.get("document_id") or "").strip()
+        questions_text = str(body.get("questions_text") or body.get("text") or "")
+        raw_list = body.get("questions")
+        pre_parsed: list[str] = []
+        if isinstance(raw_list, list):
+            pre_parsed = [str(q).strip() for q in raw_list if str(q).strip()]
+    else:
+        form = await request.form()
+        document_id = str(form.get("document_id") or "").strip()
+        questions_text = str(form.get("questions_text") or form.get("text") or "")
+        pre_parsed = []
+        f = form.get("file")
+        if f is not None and hasattr(f, "read"):
+            file_bytes = await f.read()
+            file_name = getattr(f, "filename", None) or "questions.txt"
+
+    if not document_id:
+        raise HTTPException(400, "document_id is required. Upload your notes first.")
+
+    doc = store.get_document(document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found. Upload your lecture notes again.")
+
+    # Extract questions from optional file
+    from_file: list[str] = []
+    if file_bytes:
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413,
+                f"Questions file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+            )
+        try:
+            q_text, _ = pdf_processor.extract_text_with_meta(
+                file_name or "questions.txt", file_bytes
+            )
+        except ValueError as e:
+            raise HTTPException(400, f"Could not read questions file: {e}")
+        except Exception:
+            raise HTTPException(400, "Could not read the questions file.")
+        from_file = answer_from_notes.parse_questions(q_text)
+
+    from_paste = answer_from_notes.parse_questions(questions_text)
+    # Prefer explicit list if provided (JSON), else merge paste + file
+    if "application/json" in content_type and pre_parsed:
+        questions = pre_parsed
+    else:
+        questions = from_paste + from_file
+        # dedupe while preserving order
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for q in questions:
+            k = " ".join(q.lower().split())
+            if k in seen:
+                continue
+            seen.add(k)
+            uniq.append(q)
+        questions = uniq
+
+    if not questions:
+        raise HTTPException(
+            400,
+            "No questions found. Paste questions in the text box and/or upload a "
+            "questions file (PDF, Word, or text).",
+        )
+
+    if len(questions) > answer_from_notes.MAX_QUESTIONS:
+        questions = questions[: answer_from_notes.MAX_QUESTIONS]
+
+    try:
+        answers = answer_from_notes.answer_questions(
+            questions=questions,
+            chunks=list(doc["chunks"]),
+            retriever=doc["retriever"],
+            doc_title=doc["title"] or "Lecture material",
+        )
+    except generator.GenerationError as e:
+        raise HTTPException(503, str(e))
+
+    return {
+        "mode": "my_questions",
+        "document_id": document_id,
+        "document_title": doc["title"],
+        "question_count": len(answers),
+        "truncated": len(questions) > answer_from_notes.MAX_QUESTIONS,
+        "max_questions": answer_from_notes.MAX_QUESTIONS,
+        "answers": [a.model_dump() for a in answers],
     }

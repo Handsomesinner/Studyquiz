@@ -17,6 +17,7 @@ evaluation chapter to compare grounded vs ungrounded question quality.
 |------|----------------|---------|
 | **MCQ Quiz** | Multiple-choice items with 4 options | Automatic |
 | **Exam Quiz** | Nigerian-style theory paper: QUESTION ONE/TWO, parts (a)(b), roman (i)(ii), marks | Self-practice + revision guides (not auto-marked) |
+| **My questions** | You paste/upload past questions; answers (outline + full) come from your notes | Self-check (not auto-marked) |
 
 Exam Quiz mirrors written BSc papers (Discuss / Define / Explain with mark
 allocations), so students can prepare for exams the way lecturers actually set
@@ -148,6 +149,7 @@ the raw failure rate — useful for ablation tables.
 | `POST` | `/api/exam` | Generate theory **Exam Quiz** paper (`num_questions` major questions, `course_code`, `course_title`, …) |
 | `GET` | `/api/exam/{id}` | Fetch a saved exam paper |
 | `POST` | `/api/exam/{id}/answers` | After you attempt the paper: marking points + model-answer outlines from your notes |
+| `POST` | `/api/answer-from-notes` | Your own questions (text and/or file) → outline + full answers from notes |
 | `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
 | `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |
 | `GET` | `/api/evaluation/export` | CSV export of all evaluation rows |
