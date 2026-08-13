@@ -29,10 +29,16 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  // Vercel creates this when you connect Blob with "Add a read-write token" ticked.
+  const token = process.env.BLOB_READ_WRITE_TOKEN || "";
+  if (!token) {
     return res.status(503).json({
       error:
-        "BLOB_READ_WRITE_TOKEN is not configured. Enable Vercel Blob and add the token in Project Settings → Environment Variables.",
+        "BLOB_READ_WRITE_TOKEN is not set on this deployment. " +
+        "Fix: Vercel → Project → Settings → Environment Variables → add " +
+        "BLOB_READ_WRITE_TOKEN (from Storage → Blob → .env.local / token). " +
+        "Apply to Production, then Redeploy. " +
+        `Hint: BLOB_STORE_ID is ${process.env.BLOB_STORE_ID ? "set" : "also missing"}.`,
     });
   }
 
