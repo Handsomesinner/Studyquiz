@@ -1572,7 +1572,8 @@ $("toggle-guides-btn").onclick = () => {
 $("print-exam-btn").onclick = () => window.print();
 $("exam-again-btn").onclick = () => {
   $("exam-card").classList.add("hidden");
-  $("options-card").scrollIntoView({ behavior: "smooth" });
+  showSetupForEdit();
+  $("setup-toggle-bar").classList.remove("visible");
 };
 
 function collectAnswers() {
@@ -1716,7 +1717,8 @@ $("again-btn").onclick = () => {
   $("result-card").classList.add("hidden");
   $("submit-btn").textContent = "Submit answers";
   $("submit-btn").onclick = () => submitQuiz({ force: false });
-  $("options-card").scrollIntoView({ behavior: "smooth" });
+  showSetupForEdit();
+  $("setup-toggle-bar").classList.remove("visible");
 };
 
 // —— Theme ——
