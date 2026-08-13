@@ -442,6 +442,20 @@
     text-align: center; margin-top: 2.5rem; padding: 1.35rem 1rem 0.5rem;
     border-top: 1px solid var(--line); color: var(--muted); font-size: 0.8rem;
   }
+  /* Collapse Step 1+2 after results to keep the page neat */
+  #setup-panel.setup-hidden #upload-card,
+  #setup-panel.setup-hidden #options-card { display: none !important; }
+  .setup-toggle-bar {
+    display: none; align-items: center; justify-content: space-between; gap: 0.75rem;
+    margin: 0.85rem 0 0; padding: 0.7rem 1rem;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); font-size: 0.88rem; color: var(--muted); font-weight: 500;
+  }
+  .setup-toggle-bar.visible { display: flex; }
+  .setup-toggle-bar button {
+    margin: 0; padding: 0.45rem 0.9rem; font-size: 0.85rem;
+  }
+  .setup-toggle-bar strong { color: var(--ink); font-weight: 600; }
   .author-card {
     display: inline-flex; flex-direction: column; align-items: center; gap: 0.2rem;
     margin: 0 auto 0.85rem; padding: 0.85rem 1.35rem;
@@ -529,6 +543,7 @@
 
 <main>
 
+  <div id="setup-panel">
   <section class="card" id="upload-card">
     <div class="card-head">
       <div>
@@ -652,6 +667,12 @@ Or paste any past-question list…"></textarea>
       <div class="metrics hidden" id="grounding-metrics"></div>
     </details>
   </section>
+  </div><!-- #setup-panel -->
+
+  <div class="setup-toggle-bar no-print" id="setup-toggle-bar">
+    <span id="setup-toggle-label"><strong>Setup hidden</strong> · notes &amp; options tucked away</span>
+    <button type="button" class="secondary" id="setup-toggle-btn">Show setup</button>
+  </div>
 
   <section class="card hidden" id="mine-results-card">
     <div class="card-head">
@@ -747,6 +768,34 @@ let reviewWrongOnly = false;
 let appMode = "mcq"; // mcq | exam | mine
 let guidesVisible = false;
 let lastExamPayload = null;
+let setupHidden = false;
+
+function setSetupHidden(hidden) {
+  setupHidden = !!hidden;
+  const panel = $("setup-panel");
+  const bar = $("setup-toggle-bar");
+  const btn = $("setup-toggle-btn");
+  const label = $("setup-toggle-label");
+  if (!panel || !bar || !btn) return;
+  panel.classList.toggle("setup-hidden", setupHidden);
+  bar.classList.toggle("visible", setupHidden);
+  btn.textContent = setupHidden ? "Show setup" : "Hide setup";
+  if (label) {
+    label.innerHTML = setupHidden
+      ? "<strong>Setup hidden</strong> · notes &amp; options tucked away"
+      : "<strong>Setup visible</strong> · hide to focus on your work";
+  }
+}
+
+function hideSetupForResults() {
+  setSetupHidden(true);
+}
+
+function showSetupForEdit() {
+  setSetupHidden(false);
+  $("options-card").classList.remove("hidden");
+  $("setup-panel").scrollIntoView({ behavior: "smooth" });
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -812,12 +861,28 @@ function setMode(mode) {
   $("mine-results-card").classList.add("hidden");
   $("generate-status").textContent = "";
   $("generate-status").className = "status";
+  // Show setup again when changing mode so user can configure
+  setSetupHidden(false);
+  $("setup-toggle-bar").classList.remove("visible");
 }
 
 $("mode-mcq").onclick = () => setMode("mcq");
 $("mode-exam").onclick = () => setMode("exam");
 $("mode-mine").onclick = () => setMode("mine");
 setMode("mcq");
+
+$("setup-toggle-btn").onclick = () => {
+  if (setupHidden) {
+    setSetupHidden(false);
+    // Keep the toggle bar visible so they can hide again
+    $("setup-toggle-bar").classList.add("visible");
+    $("setup-toggle-btn").textContent = "Hide setup";
+    $("setup-toggle-label").innerHTML =
+      "<strong>Setup visible</strong> · hide to focus on your work";
+  } else {
+    setSetupHidden(true);
+  }
+};
 
 async function refreshDocumentList(selectId) {
   try {
@@ -1233,6 +1298,7 @@ $("answer-notes-btn").onclick = async () => {
     $("result-card").classList.add("hidden");
     $("exam-card").classList.add("hidden");
     $("mine-results-card").classList.remove("hidden");
+    hideSetupForResults();
     $("mine-results-card").scrollIntoView({ behavior: "smooth" });
     if (payload.truncated) {
       status.textContent = `Showing first ${payload.max_questions} questions (limit per run).`;
@@ -1247,7 +1313,8 @@ $("answer-notes-btn").onclick = async () => {
 
 $("mine-again-btn").onclick = () => {
   $("mine-results-card").classList.add("hidden");
-  $("options-card").scrollIntoView({ behavior: "smooth" });
+  showSetupForEdit();
+  $("setup-toggle-bar").classList.remove("visible");
 };
 $("print-mine-btn").onclick = () => window.print();
 
@@ -1289,6 +1356,7 @@ async function generateMcq() {
     $("submit-warning").classList.add("hidden");
     $("quiz-title").textContent = `Your quiz (${quizMeta.difficulty})`;
     startTimer(parseInt($("timer-mins").value, 10) || 0);
+    hideSetupForResults();
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
