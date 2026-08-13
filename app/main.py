@@ -144,17 +144,29 @@ def _filename_from_url(url: str, fallback: str = "upload.bin") -> str:
 
 
 def _download_url_to_bytes(url: str) -> bytes:
-    """Download a remote file (e.g. Vercel Blob) with a size ceiling."""
+    """Download a remote file (e.g. Vercel Blob) with a size ceiling.
+
+    Private Blob stores need the read-write token on the request.
+    """
     max_bytes = MAX_UPLOAD_BYTES
+    headers: dict[str, str] = {}
+    blob_token = os.getenv("BLOB_READ_WRITE_TOKEN") or ""
+    if blob_token and (
+        "blob.vercel-storage.com" in url
+        or "vercel-storage.com" in url
+        or "public.blob.vercel-storage.com" in url
+    ):
+        headers["Authorization"] = f"Bearer {blob_token}"
+
     try:
-        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
+        with httpx.Client(follow_redirects=True, timeout=180.0, headers=headers) as client:
             with client.stream("GET", url) as resp:
                 if resp.status_code >= 400:
                     raise HTTPException(
                         400,
-                        f"Could not download uploaded file (HTTP {resp.status_code}).",
+                        f"Could not download uploaded file (HTTP {resp.status_code}). "
+                        "If the Blob store is Private, ensure BLOB_READ_WRITE_TOKEN is set.",
                     )
-                # Honour Content-Length when present.
                 cl = resp.headers.get("content-length")
                 if cl and cl.isdigit() and int(cl) > max_bytes:
                     raise HTTPException(
