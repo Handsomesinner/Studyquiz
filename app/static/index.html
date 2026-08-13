@@ -141,7 +141,6 @@
   <section class="card" id="upload-card">
     <span class="step">Step 1</span>
     <h2>Upload lecture material</h2>
-    <p class="hint">Max <strong>100 MB</strong> (PDF, Word, PowerPoint, text). On the live Vercel site, large files upload via <strong>Vercel Blob</strong> (not through the 4.5&nbsp;MB function body).</p>
     <input type="file" id="file" />
     <button id="upload-btn">Upload</button>
     <div id="previous-docs" class="hidden" style="margin-top:1rem">
@@ -651,7 +650,7 @@ $("generate-btn").onclick = async () => {
 async function generateMcq() {
   const status = $("generate-status");
   $("generate-btn").disabled = true;
-  status.className = "status"; status.textContent = "Generating MCQ with Claude…";
+  status.className = "status"; status.textContent = "";
   $("grounding-metrics").classList.add("hidden");
   stopTimer();
   try {
@@ -696,7 +695,7 @@ async function generateExam() {
   const status = $("generate-status");
   $("generate-btn").disabled = true;
   status.className = "status";
-  status.textContent = "Setting exam questions in parallel (faster) — usually 15–30 seconds…";
+  status.textContent = "";
   $("grounding-metrics").classList.add("hidden");
   guidesVisible = false;
   try {
