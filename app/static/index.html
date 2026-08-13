@@ -590,7 +590,6 @@
       <button class="secondary" id="print-results-btn" type="button">Print results</button>
       <button class="secondary" id="copy-summary-btn" type="button">Copy score</button>
       <a class="button-link" id="export-csv" href="/api/evaluation/export">Export CSV</a>
-      <a class="button-link" id="eval-json" href="#" target="_blank">Evaluation JSON</a>
     </div>
   </section>
 
@@ -1032,7 +1031,6 @@ async function generateMcq() {
     $("submit-btn").onclick = () => submitQuiz({ force: false });
     $("submit-warning").classList.add("hidden");
     $("quiz-title").textContent = `Take the quiz (${quizMeta.difficulty})`;
-    $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
     startTimer(parseInt($("timer-mins").value, 10) || 0);
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
@@ -1350,7 +1348,6 @@ function showResults(result) {
   } else {
     rg.classList.add("hidden");
   }
-  $("eval-json").href = `/api/quiz/${quizId}/evaluation`;
   $("result-card").classList.remove("hidden");
   applyReviewFilter();
   $("result-card").scrollIntoView({ behavior: "smooth" });
