@@ -1405,6 +1405,7 @@ async function generateExam() {
     $("gen-answers-btn").textContent = "Generate answers from my notes";
     $("toggle-guides-btn").disabled = true;
     $("toggle-guides-btn").textContent = "Show answers / marking guide";
+    hideSetupForResults();
     $("exam-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status.textContent = e.message; status.className = "status error";
