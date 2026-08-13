@@ -766,12 +766,36 @@ def generate_exam_answers(exam_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _questions_from_file_bytes(file_name: str, file_bytes: bytes) -> list[str]:
+    """Extract and parse questions from a past-paper / questions file."""
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"Questions file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
+    try:
+        q_text, _ = pdf_processor.extract_text_with_meta(
+            file_name or "questions.txt", file_bytes
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Could not read questions file: {e}")
+    except Exception:
+        raise HTTPException(400, "Could not read the questions file.")
+    return answer_from_notes.parse_questions(q_text)
+
+
 @app.post("/api/answer-from-notes")
 async def answer_from_notes_endpoint(request: Request):
     """Answer the student's own questions using retrieved lecture notes.
 
     Accepts JSON:
-      { "document_id", "questions_text"? , "questions"?: ["..."] }
+      {
+        "document_id",
+        "questions_text"?,
+        "questions"?: ["..."],
+        "questions_file_url"?,   # after Vercel Blob client upload (large files)
+        "questions_filename"?
+      }
     or multipart form:
       document_id, questions_text?, file? (questions file PDF/DOCX/txt)
     """
@@ -780,8 +804,10 @@ async def answer_from_notes_endpoint(request: Request):
     questions_text = ""
     file_bytes: bytes | None = None
     file_name = ""
+    pre_parsed: list[str] = []
+    is_json = "application/json" in content_type
 
-    if "application/json" in content_type:
+    if is_json:
         try:
             body = await request.json()
         except Exception:
@@ -789,18 +815,36 @@ async def answer_from_notes_endpoint(request: Request):
         document_id = str(body.get("document_id") or "").strip()
         questions_text = str(body.get("questions_text") or body.get("text") or "")
         raw_list = body.get("questions")
-        pre_parsed: list[str] = []
         if isinstance(raw_list, list):
             pre_parsed = [str(q).strip() for q in raw_list if str(q).strip()]
+        # Large questions files: browser → Vercel Blob → process by URL
+        # (same path as lecture notes; avoids ~4.5 MB serverless body limit).
+        file_url = str(
+            body.get("questions_file_url") or body.get("file_url") or ""
+        ).strip()
+        if file_url:
+            file_bytes = _download_url_to_bytes(file_url)
+            file_name = (
+                str(body.get("questions_filename") or body.get("filename") or "").strip()
+                or _filename_from_url(file_url, "questions.pdf")
+            )
     else:
         form = await request.form()
         document_id = str(form.get("document_id") or "").strip()
         questions_text = str(form.get("questions_text") or form.get("text") or "")
-        pre_parsed = []
         f = form.get("file")
         if f is not None and hasattr(f, "read"):
             file_bytes = await f.read()
             file_name = getattr(f, "filename", None) or "questions.txt"
+            if (
+                store._running_serverless()
+                and len(file_bytes) > DIRECT_MULTIPART_SAFE_BYTES
+            ):
+                raise HTTPException(
+                    413,
+                    "On Vercel, questions files over ~4 MB must use Blob client upload "
+                    "(the UI does this automatically when BLOB_READ_WRITE_TOKEN is set).",
+                )
 
     if not document_id:
         raise HTTPException(400, "document_id is required. Upload your notes first.")
@@ -809,27 +853,14 @@ async def answer_from_notes_endpoint(request: Request):
     if doc is None:
         raise HTTPException(404, "Document not found. Upload your lecture notes again.")
 
-    # Extract questions from optional file
+    # Extract questions from optional file (multipart bytes or Blob download)
     from_file: list[str] = []
     if file_bytes:
-        if len(file_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                413,
-                f"Questions file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
-            )
-        try:
-            q_text, _ = pdf_processor.extract_text_with_meta(
-                file_name or "questions.txt", file_bytes
-            )
-        except ValueError as e:
-            raise HTTPException(400, f"Could not read questions file: {e}")
-        except Exception:
-            raise HTTPException(400, "Could not read the questions file.")
-        from_file = answer_from_notes.parse_questions(q_text)
+        from_file = _questions_from_file_bytes(file_name or "questions.txt", file_bytes)
 
     from_paste = answer_from_notes.parse_questions(questions_text)
     # Prefer explicit list if provided (JSON), else merge paste + file
-    if "application/json" in content_type and pre_parsed:
+    if is_json and pre_parsed:
         questions = pre_parsed
     else:
         questions = from_paste + from_file

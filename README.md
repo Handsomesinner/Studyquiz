@@ -149,7 +149,7 @@ the raw failure rate — useful for ablation tables.
 | `POST` | `/api/exam` | Generate theory **Exam Quiz** paper (`num_questions` major questions, `course_code`, `course_title`, …) |
 | `GET` | `/api/exam/{id}` | Fetch a saved exam paper |
 | `POST` | `/api/exam/{id}/answers` | After you attempt the paper: marking points + model-answer outlines from your notes |
-| `POST` | `/api/answer-from-notes` | Your own questions (text and/or file) → outline + full answers from notes |
+| `POST` | `/api/answer-from-notes` | Your own questions (paste and/or file; large files via Blob URL) → answers from notes |
 | `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
 | `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |
 | `GET` | `/api/evaluation/export` | CSV export of all evaluation rows |

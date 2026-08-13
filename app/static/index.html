@@ -670,6 +670,7 @@
 Or paste any past-question list…"></textarea>
       <label class="field-label" for="questions-file">Or upload a questions file</label>
       <input type="file" id="questions-file" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
+      <p class="hint" style="margin-top:0.35rem">PDF, Word, or text — large files use the same secure upload as notes (up to 100&nbsp;MB).</p>
       <div class="btn-row">
         <button type="button" id="answer-notes-btn">Generate answers from notes</button>
       </div>
@@ -1033,14 +1034,15 @@ const BLOB_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
  * Safari was stuck at 0% with the CDN @vercel/blob client after token OK.
  *
  * Flow: POST /api/blob/upload → clientToken → XHR PUT blob.vercel-storage.com
- * You should see both requests in the Network tab.
+ * Returns { url, filename } for the stored object (notes or questions file).
  */
-async function uploadViaBlob(file, statusEl) {
+async function putFileToBlob(file, statusEl, label) {
   const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
   const pathname = (file.name || "upload.bin").replace(/\\/g, "/");
   const handleUploadUrl = new URL("/api/blob/upload", window.location.href).href;
+  const what = label || "file";
 
-  statusEl.textContent = `Preparing "${file.name}" (${sizeMb} MB)…`;
+  statusEl.textContent = `Preparing ${what} "${file.name}" (${sizeMb} MB)…`;
 
   const tokenRes = await fetch(handleUploadUrl, {
     method: "POST",
@@ -1076,7 +1078,7 @@ async function uploadViaBlob(file, statusEl) {
     );
   }
 
-  statusEl.textContent = `Uploading… 0%`;
+  statusEl.textContent = `Uploading ${what}… 0%`;
 
   const putResult = await new Promise((resolve, reject) => {
     const params = new URLSearchParams({ pathname });
@@ -1094,10 +1096,10 @@ async function uploadViaBlob(file, statusEl) {
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
         const pct = Math.round((event.loaded / event.total) * 100);
-        statusEl.textContent = `Uploading… ${pct}%`;
+        statusEl.textContent = `Uploading ${what}… ${pct}%`;
       } else if (event.loaded) {
         const mb = (event.loaded / (1024 * 1024)).toFixed(1);
-        statusEl.textContent = `Uploading… ${mb} MB sent`;
+        statusEl.textContent = `Uploading ${what}… ${mb} MB sent`;
       }
     };
 
@@ -1135,12 +1137,35 @@ async function uploadViaBlob(file, statusEl) {
     throw new Error("Blob upload finished but no file URL was returned.");
   }
 
+  return { url: putResult.url, filename: file.name || "upload.bin" };
+}
+
+/** Notes: Blob PUT → index via /api/documents */
+async function uploadViaBlob(file, statusEl) {
+  const { url, filename } = await putFileToBlob(file, statusEl, "notes");
   statusEl.textContent = "Almost done — preparing your notes…";
   return api("/api/documents", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: putResult.url, filename: file.name }),
+    body: JSON.stringify({ url, filename }),
   });
+}
+
+function blobConfigErrorMessage(err) {
+  const msg = String((err && err.message) || err || "");
+  if (
+    msg.includes("BLOB") ||
+    msg.includes("503") ||
+    msg.includes("token") ||
+    msg.includes("Failed to fetch")
+  ) {
+    return (
+      msg +
+      " — For files over ~4 MB on Vercel, enable Vercel Blob and set BLOB_READ_WRITE_TOKEN. " +
+      "Locally you can use smaller files via direct upload, or set up Blob for large files."
+    );
+  }
+  return null;
 }
 
 async function uploadViaMultipart(file, statusEl) {
@@ -1169,15 +1194,8 @@ $("upload-btn").onclick = async () => {
       try {
         doc = await uploadViaBlob(file, status);
       } catch (blobErr) {
-        // If Blob is not configured, give a clear message for large files.
-        const msg = String(blobErr.message || blobErr);
-        if (msg.includes("BLOB") || msg.includes("503") || msg.includes("token") || msg.includes("Failed to fetch")) {
-          throw new Error(
-            msg +
-              " — For files over ~4 MB on Vercel, enable Vercel Blob and set BLOB_READ_WRITE_TOKEN. " +
-              "Locally you can use smaller files via direct upload, or set up Blob for large files."
-          );
-        }
+        const hint = blobConfigErrorMessage(blobErr);
+        if (hint) throw new Error(hint);
         throw blobErr;
       }
     } else {
@@ -1322,6 +1340,29 @@ function renderMineAnswers(payload) {
   });
 }
 
+/** Answer-from-notes with a questions file already on Vercel Blob. */
+async function answerFromNotesViaBlobUrl(docId, text, blobUrl, filename) {
+  return api("/api/answer-from-notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      document_id: docId,
+      questions_text: text,
+      questions_file_url: blobUrl,
+      questions_filename: filename,
+    }),
+  });
+}
+
+/** Small questions file: multipart (local / under ~4 MB). */
+async function answerFromNotesViaMultipart(docId, text, file) {
+  const form = new FormData();
+  form.append("document_id", docId);
+  form.append("questions_text", text);
+  form.append("file", file);
+  return api("/api/answer-from-notes", { method: "POST", body: form });
+}
+
 $("answer-notes-btn").onclick = async () => {
   if (!docId) {
     $("generate-status").textContent = "Upload your lecture notes first (Step 1).";
@@ -1339,18 +1380,47 @@ $("answer-notes-btn").onclick = async () => {
     const file = fileInput.files && fileInput.files[0];
     let payload;
     if (file) {
-      const form = new FormData();
-      form.append("document_id", docId);
-      form.append("questions_text", text);
-      form.append("file", file);
-      payload = await api("/api/answer-from-notes", { method: "POST", body: form });
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new Error(
+          `Questions file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Max is ${MAX_UPLOAD_MB} MB.`
+        );
+      }
+      // Large files: Blob client upload (same as notes) → process by URL.
+      // Small files: multipart; fall back to Blob if serverless rejects size.
+      if (file.size > BLOB_THRESHOLD_BYTES) {
+        try {
+          const { url, filename } = await putFileToBlob(file, status, "questions");
+          status.textContent = "Reading questions and answering from your notes…";
+          payload = await answerFromNotesViaBlobUrl(docId, text, url, filename);
+        } catch (blobErr) {
+          const hint = blobConfigErrorMessage(blobErr);
+          if (hint) throw new Error(hint);
+          throw blobErr;
+        }
+      } else {
+        try {
+          status.textContent = "Reading questions and answering from your notes…";
+          payload = await answerFromNotesViaMultipart(docId, text, file);
+        } catch (multiErr) {
+          const msg = String(multiErr.message || multiErr);
+          if (msg.includes("4 MB") || msg.includes("413") || msg.includes("Blob")) {
+            const { url, filename } = await putFileToBlob(file, status, "questions");
+            status.textContent = "Reading questions and answering from your notes…";
+            payload = await answerFromNotesViaBlobUrl(docId, text, url, filename);
+          } else {
+            throw multiErr;
+          }
+        }
+      }
     } else {
+      status.textContent = "Answering from your notes…";
       payload = await api("/api/answer-from-notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ document_id: docId, questions_text: text }),
       });
     }
+    status.textContent = "";
     renderMineAnswers(payload);
     $("quiz-card").classList.add("hidden");
     $("result-card").classList.add("hidden");
