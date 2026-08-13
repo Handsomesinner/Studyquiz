@@ -74,16 +74,30 @@ uvicorn app.main:app --reload
 ```
 
 Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
-or any text-based file), choose the number of questions, difficulty, optional
-focus topic and exam timer, and take the quiz. The UI shows answer progress,
-warns on unanswered items, supports **review wrong only**, and **print / save
-PDF**. Saved documents reappear in the dropdown after a restart.
+or any text-based file, **up to 100 MB**), choose the number of questions,
+difficulty, optional focus topic and exam timer, and take the quiz. The UI
+shows answer progress, warns on unanswered items, supports **review wrong
+only**, and **print / save PDF**. Saved documents reappear in the dropdown
+after a restart.
+
+### Upload size (important)
+
+| Where | Practical max | How |
+|--------|----------------|-----|
+| **Local** (`uvicorn`) | **100 MB** | Direct multipart to `/api/documents` |
+| **Vercel (live)** | **~100 MB** | Browser → **Vercel Blob** → API indexes by URL |
+| **Vercel without Blob** | **~4.5 MB** | Serverless request body limit |
+
+For large files on Vercel you **must** set `BLOB_READ_WRITE_TOKEN` (Storage → Blob
+in the Vercel dashboard). The UI uses client upload for files over ~3.5 MB so
+the file never goes through the Python function body.
 
 > **Deploy note:** On **Vercel**, SQLite uses `/tmp/studyquiz.db` (the only
 > writable path). Data lasts for the life of that serverless instance only —
 > fine for demos, not for multi-user production. Locally the DB is
 > `data/studyquiz.db`. A long-lived host or external DB is needed for durable
-> multi-instance deploys. Health check: `GET /api/health`.
+> multi-instance deploys. Health check: `GET /api/health` (also reports
+> `blob_configured` and `max_upload_mb`).
 
 ## Evaluation mode (for the project write-up)
 

@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-from fastapi import FastAPI, HTTPException, UploadFile
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import coverage, exam_generator, generator, grounding, pdf_processor, store
 from .retriever import BM25Retriever
@@ -30,7 +33,14 @@ app = FastAPI(title="StudyQuiz")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# App-side ceiling (local multipart + blob-download path).
+# On Vercel, multipart bodies are still capped by the platform (~4.5 MB);
+# large files must use client → Vercel Blob → process-by-URL.
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+# Guard extracted text so a huge PDF cannot explode SQLite / BM25 memory.
+MAX_EXTRACTED_CHARS = int(os.getenv("MAX_EXTRACTED_CHARS", "5000000"))
+# Direct multipart is only reliable under the Vercel body limit when live.
+DIRECT_MULTIPART_SAFE_BYTES = 4 * 1024 * 1024
 
 
 @app.on_event("startup")
@@ -68,16 +78,25 @@ def health():
         "db_path": db,
         "serverless": store._running_serverless(),
         "detail": detail,
+        "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+        "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+        "upload_hint": (
+            "Use Vercel Blob client upload for files over ~4 MB on Vercel."
+            if store._running_serverless()
+            else "Direct multipart upload is fine locally."
+        ),
     }
 
 
-@app.post("/api/documents")
-async def upload_document(file: UploadFile):
-    data = await file.read()
+def _index_document_bytes(filename: str, data: bytes) -> dict:
+    """Extract, chunk, and persist a document from raw bytes."""
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File too large (max 20 MB).")
+        raise HTTPException(
+            413,
+            f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
     try:
-        text = pdf_processor.extract_text(file.filename or "upload.pdf", data)
+        text = pdf_processor.extract_text(filename or "upload.pdf", data)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception:
@@ -85,6 +104,13 @@ async def upload_document(file: UploadFile):
             400,
             "Could not read this file. Make sure it is a valid, non-corrupted "
             "document (PDF, Word, PowerPoint, or a text-based file).",
+        )
+
+    if len(text) > MAX_EXTRACTED_CHARS:
+        raise HTTPException(
+            413,
+            "Extracted text is too large to index in this demo deployment. "
+            "Try a shorter document or split the lecture pack.",
         )
 
     chunks = pdf_processor.chunk_text(text)
@@ -96,18 +122,112 @@ async def upload_document(file: UploadFile):
         )
 
     doc_id = uuid.uuid4().hex[:12]
+    title = filename or "untitled"
     store.save_document(
         doc_id=doc_id,
-        title=file.filename or "untitled",
+        title=title,
         text=text,
         chunks=chunks,
     )
     return {
         "id": doc_id,
-        "title": file.filename,
+        "title": title,
         "num_chunks": len(chunks),
         "num_words": len(text.split()),
     }
+
+
+def _filename_from_url(url: str, fallback: str = "upload.bin") -> str:
+    path = unquote(urlparse(url).path)
+    name = Path(path).name
+    return name or fallback
+
+
+def _download_url_to_bytes(url: str) -> bytes:
+    """Download a remote file (e.g. Vercel Blob) with a size ceiling."""
+    max_bytes = MAX_UPLOAD_BYTES
+    try:
+        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
+            with client.stream("GET", url) as resp:
+                if resp.status_code >= 400:
+                    raise HTTPException(
+                        400,
+                        f"Could not download uploaded file (HTTP {resp.status_code}).",
+                    )
+                # Honour Content-Length when present.
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"File too large (max {max_bytes // (1024 * 1024)} MB).",
+                    )
+                buf = bytearray()
+                for chunk in resp.iter_bytes(1024 * 256):
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise HTTPException(
+                            413,
+                            f"File too large (max {max_bytes // (1024 * 1024)} MB).",
+                        )
+                return bytes(buf)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f"Failed to download file for indexing: {type(e).__name__}: {e}",
+        ) from e
+
+
+class DocumentFromUrl(BaseModel):
+    """Index a file already uploaded to object storage (Vercel Blob, etc.)."""
+
+    url: str = Field(..., description="Public or readable blob URL")
+    filename: str | None = None
+
+
+@app.post("/api/documents")
+async def upload_document(request: Request):
+    """Accept either multipart file upload or JSON {url, filename}.
+
+    Large files on Vercel must use the Blob client path (JSON url), because
+    serverless request bodies are capped around 4.5 MB.
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    if "application/json" in content_type:
+        try:
+            payload = DocumentFromUrl.model_validate(await request.json())
+        except Exception:
+            raise HTTPException(
+                400,
+                "JSON body must include a string 'url' (and optional 'filename').",
+            )
+        data = _download_url_to_bytes(payload.url)
+        filename = payload.filename or _filename_from_url(payload.url)
+        return _index_document_bytes(filename, data)
+
+    # Classic multipart (local dev / small files).
+    form = await request.form()
+    file = form.get("file")
+    if file is None or not hasattr(file, "read"):
+        raise HTTPException(
+            400,
+            "Expected multipart field 'file', or JSON {url, filename} after "
+            "Vercel Blob client upload.",
+        )
+    data = await file.read()
+    filename = getattr(file, "filename", None) or "upload.bin"
+    if (
+        store._running_serverless()
+        and len(data) > DIRECT_MULTIPART_SAFE_BYTES
+    ):
+        raise HTTPException(
+            413,
+            "On Vercel, files over ~4 MB must use Blob client upload "
+            "(the UI does this automatically when BLOB_READ_WRITE_TOKEN is set).",
+        )
+    return _index_document_bytes(filename, data)
 
 
 @app.get("/api/documents")

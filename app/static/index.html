@@ -141,6 +141,7 @@
   <section class="card" id="upload-card">
     <span class="step">Step 1</span>
     <h2>Upload lecture material</h2>
+    <p class="hint">Max <strong>100 MB</strong> (PDF, Word, PowerPoint, text). On the live Vercel site, large files upload via <strong>Vercel Blob</strong> (not through the 4.5&nbsp;MB function body).</p>
     <input type="file" id="file" />
     <button id="upload-btn">Upload</button>
     <div id="previous-docs" class="hidden" style="margin-top:1rem">
@@ -449,16 +450,84 @@ $("use-rag").onchange = () => {
   else $("require-grounding").checked = true;
 };
 
+const MAX_UPLOAD_MB = 100;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+// Vercel serverless body is ~4.5 MB — above this we use Blob client upload.
+const BLOB_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
+
+async function uploadViaBlob(file, statusEl) {
+  // Dynamic import so local demos without Blob still load the page.
+  const { upload } = await import("https://esm.sh/@vercel/blob@0.27.3/client");
+  statusEl.textContent = `Uploading "${file.name}" to storage (${(file.size / (1024 * 1024)).toFixed(1)} MB)…`;
+  const blob = await upload(file.name, file, {
+    access: "public",
+    handleUploadUrl: "/api/blob/upload",
+    multipart: file.size > 8 * 1024 * 1024,
+    onUploadProgress: (p) => {
+      if (p && typeof p.percentage === "number") {
+        statusEl.textContent =
+          `Uploading to storage… ${Math.round(p.percentage)}%`;
+      }
+    },
+  });
+  statusEl.textContent = "Upload complete — indexing document…";
+  return api("/api/documents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: blob.url, filename: file.name }),
+  });
+}
+
+async function uploadViaMultipart(file, statusEl) {
+  statusEl.textContent = "Uploading and indexing…";
+  const form = new FormData();
+  form.append("file", file);
+  return api("/api/documents", { method: "POST", body: form });
+}
+
 $("upload-btn").onclick = async () => {
   const file = $("file").files[0];
   const status = $("upload-status");
   if (!file) { status.textContent = "Choose a file first."; status.className = "status error"; return; }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    status.textContent = `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Max is ${MAX_UPLOAD_MB} MB.`;
+    status.className = "status error";
+    return;
+  }
   $("upload-btn").disabled = true;
-  status.className = "status"; status.textContent = "Uploading and indexing…";
+  status.className = "status";
   try {
-    const form = new FormData();
-    form.append("file", file);
-    const doc = await api("/api/documents", { method: "POST", body: form });
+    // Prefer Blob for large files (required on Vercel above ~4 MB).
+    // Fall back to multipart for small files / local without Blob token.
+    let doc;
+    if (file.size > BLOB_THRESHOLD_BYTES) {
+      try {
+        doc = await uploadViaBlob(file, status);
+      } catch (blobErr) {
+        // If Blob is not configured, give a clear message for large files.
+        const msg = String(blobErr.message || blobErr);
+        if (msg.includes("BLOB") || msg.includes("503") || msg.includes("token") || msg.includes("Failed to fetch")) {
+          throw new Error(
+            msg +
+              " — For files over ~4 MB on Vercel, enable Vercel Blob and set BLOB_READ_WRITE_TOKEN. " +
+              "Locally you can use smaller files via direct upload, or set up Blob for large files."
+          );
+        }
+        throw blobErr;
+      }
+    } else {
+      try {
+        doc = await uploadViaMultipart(file, status);
+      } catch (multiErr) {
+        // Retry via Blob if multipart rejected as too large on Vercel.
+        const msg = String(multiErr.message || multiErr);
+        if (msg.includes("4 MB") || msg.includes("413") || msg.includes("Blob")) {
+          doc = await uploadViaBlob(file, status);
+        } else {
+          throw multiErr;
+        }
+      }
+    }
     selectDocument(
       doc.id,
       doc.title,
