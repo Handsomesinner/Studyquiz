@@ -596,7 +596,7 @@ def evaluation_summary():
 class ExamRequest(BaseModel):
     document_id: str
     num_questions: int = 3  # major questions (QUESTION ONE …); default 3 for speed
-    topic: str | None = None
+    topic: str  # required focus topic — paper must stay on this theme
     use_rag: bool = True
     difficulty: str = "medium"
     course_code: str | None = None
@@ -611,15 +611,23 @@ def create_exam(req: ExamRequest):
     if doc is None:
         raise HTTPException(404, "Document not found. Upload it again.")
 
+    topic = (req.topic or "").strip()
+    if len(topic) < 2:
+        raise HTTPException(
+            400,
+            "Focus topic is required for exam papers. "
+            "Enter a theme (e.g. cryptography, IPSec, ethical hacking).",
+        )
+
     num_questions = max(2, min(req.num_questions, 6))
     all_chunks: list[str] = list(doc["chunks"])
 
-    # Lightweight retrieval metadata for the UI (coverage is via chunk slices).
+    # Topic-focused retrieval metadata for the UI.
     retriever: BM25Retriever = doc["retriever"]
     plan = coverage.plan_retrieval(
         retriever,
         num_questions=num_questions,
-        topic=req.topic,
+        topic=topic,
         use_rag=req.use_rag,
     )
 
@@ -629,12 +637,13 @@ def create_exam(req: ExamRequest):
             doc_title=doc["title"] or "Lecture material",
             context_chunks=all_chunks,
             all_document_chunks=all_chunks,
-            topic=req.topic,
+            topic=topic,
             use_rag=req.use_rag,
             difficulty=req.difficulty,
             course_code=req.course_code,
             course_title=req.course_title,
             time_allowed=req.time_allowed or "2 Hrs.",
+            retriever=retriever,
         )
     except exam_generator.GenerationError as e:
         raise HTTPException(503, str(e))
@@ -647,7 +656,7 @@ def create_exam(req: ExamRequest):
         exam_id=exam_id,
         document_id=req.document_id,
         use_rag=req.use_rag,
-        topic=req.topic,
+        topic=topic,
         difficulty=generator._normalize_difficulty(req.difficulty),
         paper=paper_dict,
         context_chunks=sample_ctx,
@@ -659,10 +668,12 @@ def create_exam(req: ExamRequest):
         "mode": "exam",
         "difficulty": generator._normalize_difficulty(req.difficulty),
         "use_rag": req.use_rag,
+        "topic": topic,
         "total_marks": total_marks,
         "retrieval": {
             **plan.to_dict(),
-            "exam_strategy": "parallel_per_question",
+            "exam_strategy": "parallel_per_question_topic_focused",
+            "focus_topic": topic,
             "chunks_per_question": exam_generator.MAX_CHUNKS_PER_QUESTION,
             "questions_generated": len(paper.questions),
         },

@@ -190,6 +190,73 @@ def assign_chunk_slices(
     return slices
 
 
+def assign_topic_slices(
+    chunks: list[str],
+    num_questions: int,
+    topic: str,
+    retriever,
+    *,
+    per_question: int = MAX_CHUNKS_PER_QUESTION,
+) -> list[list[str]]:
+    """Retrieve note chunks relevant to ``topic`` and share them across questions.
+
+    Uses BM25 so the paper stays on the focus topic instead of random pages.
+    """
+    if num_questions <= 0:
+        return []
+    if not chunks:
+        return [[] for _ in range(num_questions)]
+
+    topic = (topic or "").strip()
+    if not topic or retriever is None:
+        return assign_chunk_slices(chunks, num_questions, per_question=per_question)
+
+    # Pull a large pool of topic-relevant chunks, then diversify.
+    pool_k = min(len(chunks), max(per_question * num_questions * 2, 12))
+    ranked = retriever.search(topic, top_k=pool_k)
+    if not ranked:
+        # Try a looser query if exact topic words are rare in the index
+        ranked = retriever.search(topic.replace(",", " "), top_k=pool_k)
+    if not ranked:
+        return assign_chunk_slices(chunks, num_questions, per_question=per_question)
+
+    try:
+        from .coverage import diversify_indices
+
+        diversified = diversify_indices(
+            ranked, top_k=min(len(ranked), per_question * num_questions), n_chunks=len(chunks)
+        )
+        indices = [i for i, _ in diversified]
+    except Exception:
+        indices = [i for i, _ in ranked[: per_question * num_questions]]
+
+    # Round-robin so each major question gets topic-relevant material
+    slices: list[list[str]] = [[] for _ in range(num_questions)]
+    for j, idx in enumerate(indices):
+        if 0 <= idx < len(chunks):
+            slices[j % num_questions].append(_trim_chunk(chunks[idx]))
+
+    # Cap per question and ensure none empty
+    for q in range(num_questions):
+        if not slices[q]:
+            # Fallback: top overall topic hits
+            slices[q] = [
+                _trim_chunk(chunks[i]) for i, _ in ranked[:per_question] if i < len(chunks)
+            ]
+        else:
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for c in slices[q]:
+                if c in seen:
+                    continue
+                seen.add(c)
+                uniq.append(c)
+            slices[q] = uniq[:per_question]
+
+    return slices
+
+
 def _generate_one_question(
     *,
     question_number: int,
@@ -206,6 +273,7 @@ def _generate_one_question(
     diff = _normalize_difficulty(difficulty)
     ordinal = ORDINALS[question_number - 1] if question_number <= len(ORDINALS) else str(question_number)
     is_first = question_number == 1
+    topic = (topic or "").strip()
 
     if use_rag and context_chunks:
         sources = "\n\n".join(
@@ -221,12 +289,24 @@ def _generate_one_question(
         )
 
     role = (
-        "This is COMPULSORY QUESTION ONE — broader coverage, slightly more parts."
+        "This is COMPULSORY QUESTION ONE — slightly broader within the focus topic, more parts."
         if is_first
-        else f"This is an optional question (QUESTION {ordinal}) — focused section of the syllabus."
+        else f"This is an optional question (QUESTION {ordinal}) — another angle on the SAME focus topic."
     )
     part_count = "5–6" if is_first else "3–5"
-    topic_line = f"\nTheme focus if relevant: {topic}." if topic else ""
+
+    if topic:
+        topic_block = f"""
+MANDATORY FOCUS TOPIC (enforce strictly):
+"{topic}"
+
+Every part of this question MUST examine an aspect of this focus topic.
+- Do NOT set questions on unrelated chapters of the course.
+- Sub-parts, definitions, and discussions must stay inside this topic.
+- You may cover different sub-themes of the topic across parts (e.g. definition, types, advantages, comparison, application) — still all under "{topic}".
+"""
+    else:
+        topic_block = ""
 
     task = f"""Set exactly ONE major theory question for a BSc practice paper.
 
@@ -236,8 +316,7 @@ def _generate_one_question(
 - About {part_count} lettered parts with marks.
 - Use roman sub-parts only when listing several items to discuss.
 {EXAM_DIFFICULTY[diff]}
-{topic_line}
-
+{topic_block}
 {material}
 
 Respond with structured fields only for this single question.
@@ -308,19 +387,30 @@ def generate_exam_paper(
     course_title: str | None = None,
     time_allowed: str = "2 Hrs.",
     all_document_chunks: list[str] | None = None,
+    retriever=None,
 ) -> ExamPaper:
     """Build a full paper by generating major questions in parallel.
 
     ``all_document_chunks`` (preferred) is sliced across questions for coverage.
-    Falls back to ``context_chunks`` when a single pool is provided.
+    When ``topic`` + ``retriever`` are set, chunks are BM25-selected for that topic.
     """
     num_questions = max(2, min(num_questions, 6))
     code = (course_code or "").strip() or _guess_code(doc_title)
     title = (course_title or "").strip() or _guess_title(doc_title)
 
     pool = all_document_chunks if all_document_chunks is not None else context_chunks
+    topic_clean = (topic or "").strip()
     if use_rag:
-        slices = assign_chunk_slices(pool or [], num_questions)
+        # When a focus topic is set, retrieve topic-relevant chunks (not random spread).
+        if topic_clean and retriever is not None:
+            slices = assign_topic_slices(
+                pool or [],
+                num_questions,
+                topic_clean,
+                retriever,
+            )
+        else:
+            slices = assign_chunk_slices(pool or [], num_questions)
     else:
         slices = [[] for _ in range(num_questions)]
 
@@ -337,7 +427,7 @@ def generate_exam_paper(
                 num_questions=num_questions,
                 doc_title=doc_title,
                 context_chunks=slices[i],
-                topic=topic,
+                topic=topic_clean or None,
                 use_rag=use_rag,
                 difficulty=difficulty,
             ): i
