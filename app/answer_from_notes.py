@@ -143,7 +143,7 @@ def _answer_one(
         f"[Source {i + 1}]\n{c}" for i, c in enumerate(chunks)
     ) or "(No relevant excerpts found in the notes.)"
 
-    task = f"""Answer this student question using ONLY the lecture excerpts below.
+    task = f"""Answer this student exam question using ONLY the lecture excerpts below.
 
 Document: "{doc_title}"
 
@@ -153,23 +153,35 @@ Question:
 Lecture excerpts:
 {sources}
 
-Rules:
-- If the excerpts do not contain enough information, set notes_cover_question=false
-  and say what is missing in full_answer; keep outline brief.
-- outline: 3–6 short bullet points (marking-scheme style).
-- full_answer: a clear model answer in 1–4 short paragraphs (not a novel).
+Write for a student revising for a university exam who needs to understand fast.
+
+full_answer (MAIN answer — shown first):
+- Clear exam-style model answer a student can study from.
+- Use short paragraphs and simple language.
+- Where helpful, use labels like Definition:, Key points:, Difference:, Example:, Why it matters:
+- Cover every part of a multi-part question in order.
+- 2–5 short paragraphs (or short labelled sections) — not a long essay.
+- Easy to skim and remember under exam pressure.
+
+outline (SUMMARY — short recap only):
+- 3–6 very short bullets for quick revision after reading the full answer.
+- Keywords and phrases only (not full sentences if a phrase is enough).
+
+Other rules:
+- If excerpts are insufficient, set notes_cover_question=false and say what is missing.
 - source_quotes: 0–3 short verbatim phrases from the excerpts (empty if none).
-- Do not invent course content that is not supported by the excerpts.
+- Do not invent content that is not supported by the excerpts.
 """
 
     client = _client()
     try:
         response = client.messages.parse(
             model=MODEL,
-            max_tokens=4000,
+            max_tokens=4500,
             system=(
-                "You are a careful university tutor. You answer only from provided "
-                "lecture notes. Prefer clarity and exam usefulness over length."
+                "You are a university exam tutor. Answer only from provided lecture notes. "
+                "Write so a student can understand and revise quickly: clear structure, "
+                "exam wording, no fluff."
             ),
             messages=[{"role": "user", "content": task}],
             output_format=_AnswerOut,

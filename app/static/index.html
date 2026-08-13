@@ -681,7 +681,7 @@ Or paste any past-question list…"></textarea>
         <h2>From your notes</h2>
       </div>
     </div>
-    <p class="hint no-print">Outline first, then open the full answer. Grounded in the document you uploaded.</p>
+    <p class="hint no-print">Full exam-style answer first. Open Summary for a quick recap. Grounded in your notes.</p>
     <div id="mine-answers"></div>
     <div class="actions no-print">
       <button class="secondary" id="mine-again-btn" type="button">Edit questions</button>
@@ -1231,11 +1231,29 @@ function renderMineAnswers(payload) {
       w.textContent = "Notes may not fully cover this question";
       card.appendChild(w);
     }
+    // Full exam answer first (primary study content)
+    const fullLabel = document.createElement("div");
+    fullLabel.style.cssText = "font-size:0.8rem;font-weight:700;color:var(--muted);margin:0.35rem 0 0.35rem";
+    fullLabel.textContent = "Answer";
+    card.appendChild(fullLabel);
+    const full = document.createElement("div");
+    full.className = "full-answer";
+    full.style.whiteSpace = "pre-wrap";
+    full.textContent = a.full_answer || "No answer returned.";
+    card.appendChild(full);
+    if (a.source_quotes && a.source_quotes.length) {
+      const qwrap = document.createElement("div");
+      qwrap.style.cssText = "margin-top:0.65rem;font-size:0.85rem;color:var(--muted);font-style:italic";
+      qwrap.textContent = "From the notes: “" + a.source_quotes.join("” · “") + "”";
+      card.appendChild(qwrap);
+    }
+    // Summary (was outline) — collapsible quick recap
     if (a.outline && a.outline.length) {
-      const olLabel = document.createElement("div");
-      olLabel.style.cssText = "font-size:0.8rem;font-weight:700;color:var(--muted);margin-bottom:0.2rem";
-      olLabel.textContent = "Outline";
-      card.appendChild(olLabel);
+      const det = document.createElement("details");
+      det.style.marginTop = "0.65rem";
+      const sum = document.createElement("summary");
+      sum.textContent = "Summary";
+      det.appendChild(sum);
       const ul = document.createElement("ul");
       ul.className = "outline-list";
       a.outline.forEach((item) => {
@@ -1243,23 +1261,9 @@ function renderMineAnswers(payload) {
         li.textContent = item;
         ul.appendChild(li);
       });
-      card.appendChild(ul);
+      det.appendChild(ul);
+      card.appendChild(det);
     }
-    const det = document.createElement("details");
-    const sum = document.createElement("summary");
-    sum.textContent = "Full answer from notes";
-    det.appendChild(sum);
-    const full = document.createElement("div");
-    full.className = "full-answer";
-    full.textContent = a.full_answer || "No full answer returned.";
-    det.appendChild(full);
-    if (a.source_quotes && a.source_quotes.length) {
-      const qwrap = document.createElement("div");
-      qwrap.style.cssText = "margin-top:0.65rem;font-size:0.85rem;color:var(--muted);font-style:italic";
-      qwrap.textContent = "From the notes: “" + a.source_quotes.join("” · “") + "”";
-      det.appendChild(qwrap);
-    }
-    card.appendChild(det);
     holder.appendChild(card);
   });
 }
