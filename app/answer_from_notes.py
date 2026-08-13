@@ -158,7 +158,9 @@ Write for a student revising for a university exam who needs to understand fast.
 full_answer (MAIN answer — shown first):
 - Clear exam-style model answer a student can study from.
 - Use short paragraphs and simple language.
-- Where helpful, use labels like Definition:, Key points:, Difference:, Example:, Why it matters:
+- Where helpful, start sections with plain labels ending in a colon, e.g.
+  Functionality: ... or Definition: ...
+  Do NOT use markdown asterisks like **bold** — the app will style labels itself.
 - Cover every part of a multi-part question in order.
 - 2–5 short paragraphs (or short labelled sections) — not a long essay.
 - Easy to skim and remember under exam pressure.

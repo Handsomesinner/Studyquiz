@@ -250,9 +250,23 @@
     margin: 0.35rem 0 0.75rem 1.1rem; color: var(--ink-soft); font-size: 0.92rem;
   }
   .answer-card .full-answer {
-    margin-top: 0.5rem; padding: 0.75rem 0.9rem; background: var(--card);
+    margin-top: 0.5rem; padding: 0.85rem 1rem; background: var(--card);
     border-radius: var(--radius-sm); border-left: 3px solid var(--accent);
-    font-size: 0.93rem; color: var(--ink-soft); line-height: 1.55;
+    font-size: 0.93rem; color: var(--ink-soft); line-height: 1.6;
+  }
+  .answer-card .full-answer p {
+    margin: 0 0 0.75rem;
+  }
+  .answer-card .full-answer p:last-child { margin-bottom: 0; }
+  .answer-card .full-answer strong,
+  .answer-card .full-answer .ans-label {
+    font-weight: 700;
+    color: var(--accent);
+    display: inline;
+  }
+  [data-theme="dark"] .answer-card .full-answer strong,
+  [data-theme="dark"] .answer-card .full-answer .ans-label {
+    color: var(--accent-2);
   }
   .answer-card .weak {
     font-size: 0.85rem; color: var(--warn); font-weight: 600; margin-bottom: 0.4rem;
@@ -1196,6 +1210,35 @@ $("generate-btn").onclick = async () => {
   return generateMcq();
 };
 
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Turn **Label:** and plain Label: lines into readable HTML (bold labels, no raw **). */
+function formatAnswerHtml(text) {
+  if (!text) return "<p>No answer returned.</p>";
+  let t = escapeHtml(text);
+  // Markdown bold **...**
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<strong class="ans-label">$1</strong>');
+  // Leftover lone ** 
+  t = t.replace(/\*\*/g, "");
+  // Lines like Functionality: at start of paragraph (if not already strong)
+  t = t.replace(
+    /(^|\n)(?!<strong)([A-Za-z][A-Za-z0-9 /&\-]{1,40}):(\s+)/g,
+    '$1<strong class="ans-label">$2:</strong>$3'
+  );
+  // Split into paragraphs on blank lines or single newlines for readability
+  const blocks = t.split(/\n{2,}|\n/).filter((b) => b.trim());
+  if (blocks.length <= 1) {
+    return `<p>${t.replace(/\n/g, "<br>")}</p>`;
+  }
+  return blocks.map((b) => `<p>${b.trim()}</p>`).join("");
+}
+
 function renderMineAnswers(payload) {
   const holder = $("mine-answers");
   holder.innerHTML = "";
@@ -1238,8 +1281,7 @@ function renderMineAnswers(payload) {
     card.appendChild(fullLabel);
     const full = document.createElement("div");
     full.className = "full-answer";
-    full.style.whiteSpace = "pre-wrap";
-    full.textContent = a.full_answer || "No answer returned.";
+    full.innerHTML = formatAnswerHtml(a.full_answer || "No answer returned.");
     card.appendChild(full);
     if (a.source_quotes && a.source_quotes.length) {
       const qwrap = document.createElement("div");
@@ -1247,7 +1289,7 @@ function renderMineAnswers(payload) {
       qwrap.textContent = "From the notes: “" + a.source_quotes.join("” · “") + "”";
       card.appendChild(qwrap);
     }
-    // Summary (was outline) — collapsible quick recap
+    // Summary — collapsible quick recap
     if (a.outline && a.outline.length) {
       const det = document.createElement("details");
       det.style.marginTop = "0.65rem";
@@ -1258,7 +1300,7 @@ function renderMineAnswers(payload) {
       ul.className = "outline-list";
       a.outline.forEach((item) => {
         const li = document.createElement("li");
-        li.textContent = item;
+        li.innerHTML = formatAnswerHtml(item).replace(/^<p>|<\/p>$/g, "");
         ul.appendChild(li);
       });
       det.appendChild(ul);
