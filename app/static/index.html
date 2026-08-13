@@ -402,9 +402,44 @@
   }
 
   footer.site-foot {
-    text-align: center; margin-top: 2.5rem; padding-top: 1.25rem;
+    text-align: center; margin-top: 2.5rem; padding: 1.35rem 1rem 0.5rem;
     border-top: 1px solid var(--line); color: var(--muted); font-size: 0.8rem;
   }
+  .author-card {
+    display: inline-flex; flex-direction: column; align-items: center; gap: 0.2rem;
+    margin: 0 auto 0.85rem; padding: 0.85rem 1.35rem;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); max-width: 100%;
+  }
+  .author-card .label {
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  [data-theme="dark"] .author-card .label { color: var(--accent-2); }
+  .author-card .name {
+    font-family: var(--display); font-size: 1.05rem; font-weight: 600;
+    color: var(--ink); letter-spacing: -0.02em; line-height: 1.25;
+  }
+  .author-card .matric {
+    font-size: 0.82rem; font-weight: 600; color: var(--ink-soft);
+    font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+  }
+  .author-card .meta {
+    font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem;
+  }
+  .hero .author-inline {
+    margin-top: 1rem; font-size: 0.88rem; color: var(--muted);
+  }
+  .hero .author-inline strong {
+    color: var(--accent); font-weight: 700;
+  }
+  [data-theme="dark"] .hero .author-inline strong { color: var(--accent-2); }
+  .hero .author-inline .matric-chip {
+    display: inline-block; margin-left: 0.35rem; padding: 0.12rem 0.5rem;
+    border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+    font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em;
+  }
+  [data-theme="dark"] .hero .author-inline .matric-chip { color: var(--accent-2); }
 
   @media print {
     body { background: #fff; background-image: none; }
@@ -439,6 +474,11 @@
       <span class="pill">MCQ + theory exams</span>
       <span class="pill">Instant feedback</span>
     </div>
+    <p class="author-inline">
+      A final-year project by
+      <strong>Famule Oluwapamilerin Solomon</strong>
+      <span class="matric-chip">FTP/CSC/26/0133938</span>
+    </p>
   </header>
 
   <div class="mode-switch no-print" role="tablist" aria-label="Study mode">
@@ -621,6 +661,12 @@
 </main>
 
   <footer class="site-foot no-print">
+    <div class="author-card">
+      <span class="label">Final year project</span>
+      <span class="name">Famule Oluwapamilerin Solomon</span>
+      <span class="matric">FTP/CSC/26/0133938</span>
+      <span class="meta">Department of Computer Science · Supervisor: Dr. Aderibigbe</span>
+    </div>
     StudyQuiz · Practice that stays with your notes
   </footer>
 </div>
