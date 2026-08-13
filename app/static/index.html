@@ -455,81 +455,119 @@ const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 // Vercel serverless body is ~4.5 MB — above this we use Blob client upload.
 const BLOB_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
 
-function progressLabel(p) {
-  if (!p) return null;
-  // SDK may report percentage 0–100 or 0–1, or loaded/total only.
-  let pct = null;
-  if (typeof p.percentage === "number") {
-    pct = p.percentage <= 1 ? p.percentage * 100 : p.percentage;
-  } else if (p.total && p.loaded != null) {
-    pct = (p.loaded / p.total) * 100;
-  }
-  if (pct == null || Number.isNaN(pct)) return null;
-  return Math.min(100, Math.max(0, Math.round(pct)));
-}
-
+/**
+ * Native Blob client upload (no esm.sh SDK).
+ * Safari was stuck at 0% with the CDN @vercel/blob client after token OK.
+ *
+ * Flow: POST /api/blob/upload → clientToken → XHR PUT blob.vercel-storage.com
+ * You should see both requests in the Network tab.
+ */
 async function uploadViaBlob(file, statusEl) {
-  // Dynamic import so local demos without Blob still load the page.
-  statusEl.textContent = "Loading upload library…";
-  let upload;
-  try {
-    ({ upload } = await import("https://esm.sh/@vercel/blob@0.27.3/client?bundle"));
-  } catch (e) {
-    throw new Error("Could not load Vercel Blob client from CDN: " + (e.message || e));
-  }
-
   const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-  // Vercel dashboard default is often Private — access must match the store.
-  // Try private first (recommended), then public.
-  const modes = ["private", "public"];
-  let lastErr = null;
+  const pathname = (file.name || "upload.bin").replace(/\\/g, "/");
+  const handleUploadUrl = new URL("/api/blob/upload", window.location.href).href;
 
-  for (const access of modes) {
-    try {
-      statusEl.textContent =
-        `Uploading "${file.name}" (${sizeMb} MB) via Blob (${access})…`;
-      // Avoid multipart on first try — more reliable in Safari; use for very large only.
-      const useMultipart = file.size > 32 * 1024 * 1024;
-      const blob = await upload(file.name, file, {
-        access,
-        handleUploadUrl: "/api/blob/upload",
-        multipart: useMultipart,
-        onUploadProgress: (p) => {
-          const pct = progressLabel(p);
-          if (pct != null) {
-            statusEl.textContent = `Uploading to storage (${access})… ${pct}%`;
-          } else {
-            statusEl.textContent = `Uploading to storage (${access})…`;
-          }
-        },
-      });
-      if (!blob || !blob.url) {
-        throw new Error("Blob upload returned no URL");
-      }
-      statusEl.textContent = "Upload complete — indexing document…";
-      return api("/api/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: blob.url, filename: file.name }),
-      });
-    } catch (e) {
-      lastErr = e;
-      const msg = String(e && e.message ? e.message : e);
-      // Access mismatch → try the other mode
-      if (
-        msg.toLowerCase().includes("access") ||
-        msg.toLowerCase().includes("private") ||
-        msg.toLowerCase().includes("public") ||
-        msg.toLowerCase().includes("forbidden") ||
-        msg.toLowerCase().includes("403")
-      ) {
-        statusEl.textContent = `Blob ${access} failed, retrying…`;
-        continue;
-      }
-      throw e;
-    }
+  statusEl.textContent = `Requesting upload token for "${file.name}" (${sizeMb} MB)…`;
+
+  const tokenRes = await fetch(handleUploadUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "blob.generate-client-token",
+      payload: {
+        pathname,
+        callbackUrl: handleUploadUrl,
+        clientPayload: null,
+        multipart: false,
+      },
+    }),
+  });
+
+  let tokenJson = {};
+  try {
+    tokenJson = await tokenRes.json();
+  } catch (_) { /* ignore */ }
+
+  if (!tokenRes.ok) {
+    throw new Error(
+      tokenJson.error ||
+        tokenJson.detail ||
+        `Failed to get Blob client token (HTTP ${tokenRes.status})`
+    );
   }
-  throw lastErr || new Error("Blob upload failed for both private and public access");
+
+  const clientToken = tokenJson.clientToken;
+  if (!clientToken) {
+    throw new Error(
+      "Blob token response missing clientToken. Check /api/blob/upload."
+    );
+  }
+
+  statusEl.textContent = `Uploading to Vercel Blob… 0%`;
+
+  const putResult = await new Promise((resolve, reject) => {
+    const params = new URLSearchParams({ pathname });
+    const putUrl = `https://blob.vercel-storage.com/?${params.toString()}`;
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", putUrl);
+    xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
+    xhr.setRequestHeader("x-api-version", "9");
+    xhr.setRequestHeader(
+      "x-content-type",
+      file.type || "application/octet-stream"
+    );
+    xhr.setRequestHeader("x-content-length", String(file.size));
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const pct = Math.round((event.loaded / event.total) * 100);
+        statusEl.textContent = `Uploading to Vercel Blob… ${pct}%`;
+      } else if (event.loaded) {
+        const mb = (event.loaded / (1024 * 1024)).toFixed(1);
+        statusEl.textContent = `Uploading to Vercel Blob… ${mb} MB sent`;
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch (e) {
+          reject(new Error("Blob storage returned invalid JSON"));
+        }
+        return;
+      }
+      const snippet = (xhr.responseText || "").slice(0, 300);
+      reject(
+        new Error(
+          `Blob storage PUT failed (HTTP ${xhr.status}). ${snippet || "No body."} ` +
+            "Confirm the store is Public and BLOB_READ_WRITE_TOKEN matches this project."
+        )
+      );
+    };
+
+    xhr.onerror = () =>
+      reject(
+        new Error(
+          "Network error talking to blob.vercel-storage.com (check Network tab)."
+        )
+      );
+    xhr.ontimeout = () => reject(new Error("Blob upload timed out."));
+    xhr.timeout = 15 * 60 * 1000; // 15 minutes for large files
+
+    xhr.send(file);
+  });
+
+  if (!putResult || !putResult.url) {
+    throw new Error("Blob upload finished but no file URL was returned.");
+  }
+
+  statusEl.textContent = "Upload complete — indexing document…";
+  return api("/api/documents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: putResult.url, filename: file.name }),
+  });
 }
 
 async function uploadViaMultipart(file, statusEl) {
