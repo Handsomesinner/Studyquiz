@@ -95,8 +95,11 @@ def _index_document_bytes(filename: str, data: bytes) -> dict:
             413,
             f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
         )
+    ocr_used = False
     try:
-        text = pdf_processor.extract_text(filename or "upload.pdf", data)
+        text, ocr_used = pdf_processor.extract_text_with_meta(
+            filename or "upload.pdf", data
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception:
@@ -117,8 +120,9 @@ def _index_document_bytes(filename: str, data: bytes) -> dict:
     if len(chunks) == 0:
         raise HTTPException(
             400,
-            "No text could be extracted. Scanned/image-only documents are not "
-            "supported (OCR is outside the project scope).",
+            "No text could be extracted from this document. "
+            "If it is a scan, ensure ANTHROPIC_API_KEY is set (OCR fallback) "
+            "and the pages are readable.",
         )
 
     doc_id = uuid.uuid4().hex[:12]
@@ -134,6 +138,7 @@ def _index_document_bytes(filename: str, data: bytes) -> dict:
         "title": title,
         "num_chunks": len(chunks),
         "num_words": len(text.split()),
+        "ocr_used": ocr_used,
     }
 
 

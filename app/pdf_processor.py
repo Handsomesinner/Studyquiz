@@ -6,14 +6,19 @@ report: text extraction and chunking.
 Text-based documents of any kind are accepted. PDF, Word (.docx) and
 PowerPoint (.pptx) are parsed with dedicated libraries; everything else is
 read as plain text (covers .txt, .md, .csv, .html, source files, …).
-Scanned/image-only files still can't be read — OCR is outside the project
-scope — so genuinely binary uploads are rejected with a clear message.
+
+Scanned / image-only PDFs: if pypdf finds little embedded text, we fall back
+to Claude document OCR (see ocr.py) when ANTHROPIC_API_KEY is available.
 """
+
+from __future__ import annotations
 
 import io
 import re
 
 from pypdf import PdfReader
+
+from . import ocr as ocr_mod
 
 # Chunks are sized in words. Roughly 200 words per chunk keeps each chunk
 # focused on one idea, and the overlap stops a sentence that straddles a
@@ -22,9 +27,34 @@ CHUNK_SIZE_WORDS = 200
 CHUNK_OVERLAP_WORDS = 40
 
 
-def _extract_pdf(data: bytes) -> str:
+def _extract_pdf_embedded(data: bytes) -> tuple[str, int]:
+    """Return (embedded_text, page_count) without OCR."""
     reader = PdfReader(io.BytesIO(data))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    page_count = len(reader.pages)
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    return text, page_count
+
+
+def _extract_pdf(data: bytes, *, filename: str = "upload.pdf") -> tuple[str, bool]:
+    """Extract PDF text; OCR if embedded text is too thin.
+
+    Returns (text, ocr_used).
+    """
+    embedded, page_count = _extract_pdf_embedded(data)
+    cleaned = _normalize_whitespace(embedded)
+
+    if not ocr_mod.needs_ocr(cleaned, page_count):
+        return cleaned, False
+
+    # Thin/empty embedded text → Claude OCR fallback.
+    try:
+        ocr_text = ocr_mod.ocr_pdf(data, filename=filename)
+        return _normalize_whitespace(ocr_text), True
+    except ocr_mod.OcrError:
+        # If we had a little embedded text, prefer it over total failure.
+        if cleaned.strip():
+            return cleaned, False
+        raise
 
 
 def _extract_docx(data: bytes) -> str:
@@ -62,29 +92,46 @@ def _extract_plain_text(data: bytes) -> str:
         )
         if bad / len(text) > 0.30:
             raise ValueError(
-                "This file doesn't appear to contain readable text. Scanned "
-                "images and media files aren't supported (OCR is out of "
-                "scope). Try a PDF, Word, PowerPoint, or text document."
+                "This file doesn't appear to contain readable text. "
+                "Try a PDF, Word, PowerPoint, or text document. "
+                "Scanned PDFs are supported when OCR is enabled."
             )
     return text
 
 
-def extract_text(filename: str, data: bytes) -> str:
-    """Extract raw text from an uploaded document of any text-based type."""
-    name = filename.lower()
-    if name.endswith(".pdf"):
-        text = _extract_pdf(data)
-    elif name.endswith(".docx"):
-        text = _extract_docx(data)
-    elif name.endswith(".pptx"):
-        text = _extract_pptx(data)
-    else:
-        text = _extract_plain_text(data)
-
-    # Collapse repeated whitespace that document extraction tends to produce.
+def _normalize_whitespace(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def extract_text(filename: str, data: bytes) -> str:
+    """Extract raw text from an uploaded document of any text-based type.
+
+    For PDFs with little embedded text, may call Claude OCR (slower, needs API key).
+    """
+    text, _ocr_used = extract_text_with_meta(filename, data)
+    return text
+
+
+def extract_text_with_meta(filename: str, data: bytes) -> tuple[str, bool]:
+    """Like extract_text, but also returns whether OCR was used."""
+    name = (filename or "upload.bin").lower()
+    ocr_used = False
+    try:
+        if name.endswith(".pdf"):
+            text, ocr_used = _extract_pdf(data, filename=filename or "upload.pdf")
+        elif name.endswith(".docx"):
+            text = _extract_docx(data)
+        elif name.endswith(".pptx"):
+            text = _extract_pptx(data)
+        else:
+            text = _extract_plain_text(data)
+    except ocr_mod.OcrError as e:
+        raise ValueError(str(e)) from e
+
+    text = _normalize_whitespace(text)
+    return text, ocr_used
 
 
 def chunk_text(text: str) -> list[str]:

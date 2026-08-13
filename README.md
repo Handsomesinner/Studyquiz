@@ -130,7 +130,9 @@ the raw failure rate — useful for ablation tables.
 
 ## Scope / limitations (as stated in the proposal)
 
-- Text-based documents (PDF, Word, PowerPoint, plain text) — scanned/handwritten documents (OCR) are out of scope.
+- PDF, Word, PowerPoint, plain text. **Scanned/image-only PDFs** use an optional
+  **Claude OCR fallback** when embedded text is empty (requires `ANTHROPIC_API_KEY`;
+  capped by `OCR_MAX_PAGES`, default 30). Handwriting quality varies.
 - Multiple-choice questions only; essay grading is out of scope.
 - Single-user SQLite store (no accounts yet); multi-user auth is future work.
   Serverless hosts still need external storage for durable multi-instance use.
