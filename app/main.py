@@ -596,7 +596,7 @@ def evaluation_summary():
 class ExamRequest(BaseModel):
     document_id: str
     num_questions: int = 3  # major questions (QUESTION ONE …); default 3 for speed
-    topic: str  # required focus topic — paper must stay on this theme
+    topic: str | None = None  # optional focus; when set, steers retrieval + prompts
     use_rag: bool = True
     difficulty: str = "medium"
     course_code: str | None = None
@@ -611,18 +611,11 @@ def create_exam(req: ExamRequest):
     if doc is None:
         raise HTTPException(404, "Document not found. Upload it again.")
 
-    topic = (req.topic or "").strip()
-    if len(topic) < 2:
-        raise HTTPException(
-            400,
-            "Focus topic is required for exam papers. "
-            "Enter a theme (e.g. cryptography, IPSec, ethical hacking).",
-        )
-
+    topic = (req.topic or "").strip() or None
     num_questions = max(2, min(req.num_questions, 6))
     all_chunks: list[str] = list(doc["chunks"])
 
-    # Topic-focused retrieval metadata for the UI.
+    # Retrieval metadata for the UI (topic-focused when a topic is given).
     retriever: BM25Retriever = doc["retriever"]
     plan = coverage.plan_retrieval(
         retriever,
@@ -663,6 +656,9 @@ def create_exam(req: ExamRequest):
     )
 
     total_marks = exam_generator.paper_total_marks(paper)
+    strategy = (
+        "parallel_per_question_topic_focused" if topic else "parallel_per_question"
+    )
     return {
         "exam_id": exam_id,
         "mode": "exam",
@@ -672,7 +668,7 @@ def create_exam(req: ExamRequest):
         "total_marks": total_marks,
         "retrieval": {
             **plan.to_dict(),
-            "exam_strategy": "parallel_per_question_topic_focused",
+            "exam_strategy": strategy,
             "focus_topic": topic,
             "chunks_per_question": exam_generator.MAX_CHUNKS_PER_QUESTION,
             "questions_generated": len(paper.questions),

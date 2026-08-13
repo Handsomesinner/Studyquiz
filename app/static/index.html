@@ -866,15 +866,15 @@ function setMode(mode) {
     $("time-allowed-field").classList.toggle("hidden", !isExam);
     $("grounding-toggle").classList.toggle("hidden", isExam);
     $("generate-btn").textContent = isExam ? "Generate exam paper" : "Start practice";
-    // Focus topic is required for exam papers
+    // Focus topic is always optional (steers retrieval/prompts when filled)
     const topicOpt = $("topic-optional");
     if (topicOpt) {
-      topicOpt.textContent = isExam ? "(required)" : "(optional)";
-      topicOpt.style.opacity = isExam ? "1" : "0.7";
-      topicOpt.style.fontWeight = isExam ? "700" : "500";
-      topicOpt.style.color = isExam ? "var(--accent)" : "";
+      topicOpt.textContent = "(optional)";
+      topicOpt.style.opacity = "0.7";
+      topicOpt.style.fontWeight = "500";
+      topicOpt.style.color = "";
     }
-    $("topic").required = isExam;
+    $("topic").required = false;
     $("topic").placeholder = isExam
       ? "e.g. cryptography, network security, IPSec"
       : "e.g. process scheduling";
@@ -1423,13 +1423,7 @@ async function generateMcq() {
 
 async function generateExam() {
   const status = $("generate-status");
-  const topic = $("topic").value.trim();
-  if (!topic || topic.length < 2) {
-    status.textContent = "Enter a focus topic so the exam paper stays on that theme.";
-    status.className = "status error";
-    $("topic").focus();
-    return;
-  }
+  const topic = $("topic").value.trim() || null;
   if (!docId) {
     status.textContent = "Upload your lecture notes first (Step 1).";
     status.className = "status error";
@@ -1462,8 +1456,11 @@ async function generateExam() {
     renderGroundingMetrics(null, $("grounding-metrics"), exam.retrieval);
     const m = $("grounding-metrics");
     const strat = (exam.retrieval && exam.retrieval.exam_strategy) || "parallel";
-    const focus = (exam.topic || exam.retrieval && exam.retrieval.focus_topic) || topic;
-    m.innerHTML += `<br><strong>Exam Quiz</strong> — focus: <strong>${focus}</strong> · ${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks · <code>${strat}</code>`;
+    const focus = (exam.topic || (exam.retrieval && exam.retrieval.focus_topic) || topic);
+    const focusBit = focus
+      ? `focus: <strong>${focus}</strong> · `
+      : "";
+    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${focusBit}${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks · <code>${strat}</code>`;
     m.classList.remove("hidden");
     status.textContent = "";
     $("exam-answer-status").textContent = "";

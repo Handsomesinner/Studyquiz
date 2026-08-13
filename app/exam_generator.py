@@ -288,25 +288,29 @@ def _generate_one_question(
             f"\"{doc_title}\". Leave source_quote empty on every part."
         )
 
-    role = (
-        "This is COMPULSORY QUESTION ONE — slightly broader within the focus topic, more parts."
-        if is_first
-        else f"This is an optional question (QUESTION {ordinal}) — another angle on the SAME focus topic."
-    )
-    part_count = "5–6" if is_first else "3–5"
-
     if topic:
+        role = (
+            "This is COMPULSORY QUESTION ONE — slightly broader within the focus topic, more parts."
+            if is_first
+            else f"This is an optional question (QUESTION {ordinal}) — another angle on the SAME focus topic."
+        )
         topic_block = f"""
-MANDATORY FOCUS TOPIC (enforce strictly):
+FOCUS TOPIC:
 "{topic}"
 
-Every part of this question MUST examine an aspect of this focus topic.
-- Do NOT set questions on unrelated chapters of the course.
-- Sub-parts, definitions, and discussions must stay inside this topic.
+Every part of this question must examine an aspect of this focus topic.
+- Do not set questions on unrelated chapters of the course.
+- Sub-parts, definitions, and discussions stay inside this topic.
 - You may cover different sub-themes of the topic across parts (e.g. definition, types, advantages, comparison, application) — still all under "{topic}".
 """
     else:
+        role = (
+            "This is COMPULSORY QUESTION ONE — slightly broader, more parts."
+            if is_first
+            else f"This is an optional question (QUESTION {ordinal}) — a different angle from the notes."
+        )
         topic_block = ""
+    part_count = "5–6" if is_first else "3–5"
 
     task = f"""Set exactly ONE major theory question for a BSc practice paper.
 
