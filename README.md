@@ -61,9 +61,10 @@ questions.
 - **Grading** — answers are kept server-side; the browser never sees the
   correct option until the quiz is submitted.
 - **Persistence** — `store.py` saves documents, quizzes, attempt scores, and
-  evaluation rows in **SQLite** (`data/studyquiz.db` by default). Restart the
-  server and previous uploads are still available. Override the path with
-  `STUDYQUIZ_DB=/path/to/file.db`.
+  evaluation rows. **Locally** it uses **SQLite** (`data/studyquiz.db`; override
+  with `STUDYQUIZ_DB`). **On Vercel**, set **Turso** (`TURSO_DATABASE_URL` +
+  `TURSO_AUTH_TOKEN`) so data survives cold starts; without Turso the app falls
+  back to ephemeral `/tmp` SQLite.
 
 ## Running it
 
@@ -93,12 +94,19 @@ For large files on Vercel you **must** set `BLOB_READ_WRITE_TOKEN` (Storage → 
 in the Vercel dashboard). The UI uses client upload for files over ~3.5 MB so
 the file never goes through the Python function body.
 
-> **Deploy note:** On **Vercel**, SQLite uses `/tmp/studyquiz.db` (the only
-> writable path). Data lasts for the life of that serverless instance only —
-> fine for demos, not for multi-user production. Locally the DB is
-> `data/studyquiz.db`. A long-lived host or external DB is needed for durable
-> multi-instance deploys. Health check: `GET /api/health` (also reports
-> `blob_configured` and `max_upload_mb`).
+> **Deploy note — durable storage (Turso):** On Vercel, local SQLite can only
+> write to `/tmp` and **disappears on cold start**. For lasting documents and
+> quizzes, create a free [Turso](https://turso.tech) database and set:
+>
+> | Variable | Example |
+> |----------|---------|
+> | `TURSO_DATABASE_URL` | `libsql://studyquiz-yourorg.turso.io` |
+> | `TURSO_AUTH_TOKEN` | token from `turso db tokens create studyquiz` |
+>
+> Schema is created automatically on first request (same tables as local SQLite).
+> Local `uvicorn` keeps using `data/studyquiz.db` unless Turso env vars are set.
+> Health check: `GET /api/health` reports `storage_backend`, `storage_durable`,
+> `blob_configured`, and `max_upload_mb`.
 
 ## Evaluation mode (for the project write-up)
 
@@ -135,8 +143,8 @@ the raw failure rate — useful for ablation tables.
   **Claude OCR fallback** when embedded text is empty (requires `ANTHROPIC_API_KEY`;
   capped by `OCR_MAX_PAGES`, default 30). Handwriting quality varies.
 - Multiple-choice questions only; essay grading is out of scope.
-- Single-user SQLite store (no accounts yet); multi-user auth is future work.
-  Serverless hosts still need external storage for durable multi-instance use.
+- Single-user store (no accounts yet); multi-user auth is future work.
+  On Vercel, configure Turso for durable multi-instance storage (see deploy note).
 
 ## API
 

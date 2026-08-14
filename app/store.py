@@ -1,33 +1,45 @@
-"""SQLite persistence for documents, quizzes, attempts, and evaluation rows.
+"""Persistence for documents, quizzes, attempts, evaluation rows, and exams.
 
-Replaces the in-memory dicts so demos survive process restarts. Uses only the
-stdlib ``sqlite3`` module — no extra dependencies. BM25 indexes are rebuilt
-from stored chunks on load (cheap for lecture-sized documents).
+**Local demos** — stdlib ``sqlite3`` file DB (``data/studyquiz.db`` by default).
+
+**Vercel / durable** — when ``TURSO_DATABASE_URL`` (and usually
+``TURSO_AUTH_TOKEN``) are set, the same schema is stored on **Turso**
+(libSQL over HTTPS via ``httpx``). Data then survives cold starts and is
+shared across serverless instances.
+
+Without Turso on Vercel, falls back to ``/tmp/studyquiz.db`` (ephemeral).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
+
+import httpx
 
 from .generator import QuizQuestion
 from .grounding import QuestionGrounding
 from .retriever import BM25Retriever
 
 # Default (local): <repo>/data/studyquiz.db  — override with STUDYQUIZ_DB.
-# On Vercel/Lambda the deployment FS is read-only; only /tmp is writable.
+# On Vercel/Lambda without Turso the deployment FS is read-only; only /tmp.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "data" / "studyquiz.db"
 
 _local = threading.local()
 _schema_ready = False
 _schema_lock = threading.Lock()
+
+# Turso HTTP pipeline client (shared; thread-safe enough for short requests).
+_turso_client: httpx.Client | None = None
+_turso_client_lock = threading.Lock()
 
 
 def _running_serverless() -> bool:
@@ -38,7 +50,47 @@ def _running_serverless() -> bool:
     )
 
 
+def turso_url() -> str | None:
+    """Remote libSQL / Turso URL if configured."""
+    raw = (
+        os.getenv("TURSO_DATABASE_URL")
+        or os.getenv("LIBSQL_URL")
+        or os.getenv("STUDYQUIZ_TURSO_URL")
+        or ""
+    ).strip()
+    return raw or None
+
+
+def turso_auth_token() -> str:
+    return (
+        os.getenv("TURSO_AUTH_TOKEN")
+        or os.getenv("LIBSQL_AUTH_TOKEN")
+        or os.getenv("STUDYQUIZ_TURSO_TOKEN")
+        or ""
+    ).strip()
+
+
+def using_turso() -> bool:
+    return turso_url() is not None
+
+
+def storage_backend() -> str:
+    """``turso`` | ``sqlite``."""
+    return "turso" if using_turso() else "sqlite"
+
+
+def storage_is_durable() -> bool:
+    """True when data is expected to survive process/instance restarts."""
+    if using_turso():
+        return True
+    # Local file DB is durable for that machine; /tmp on serverless is not.
+    if _running_serverless() and not using_turso():
+        return False
+    return True
+
+
 def db_path() -> Path:
+    """Local SQLite path (ignored when Turso is active)."""
     raw = os.getenv("STUDYQUIZ_DB")
     if raw:
         return Path(raw)
@@ -47,12 +99,282 @@ def db_path() -> Path:
     return DEFAULT_DB_PATH
 
 
-def _connect() -> sqlite3.Connection:
+def storage_info() -> dict[str, Any]:
+    """Describe active persistence for health checks / UI."""
+    if using_turso():
+        url = turso_url() or ""
+        # Hide credentials; show host only.
+        host = url
+        for prefix in ("libsql://", "https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix) :]
+                break
+        host = host.split("/")[0]
+        return {
+            "backend": "turso",
+            "durable": True,
+            "host": host,
+            "db_path": f"turso://{host}",
+            "hint": "Documents and quizzes persist across deploys and cold starts.",
+        }
+    path = str(db_path())
+    durable = storage_is_durable()
+    return {
+        "backend": "sqlite",
+        "durable": durable,
+        "host": None,
+        "db_path": path,
+        "hint": (
+            "Local SQLite file — data survives restarts on this machine."
+            if durable
+            else "Ephemeral /tmp SQLite on Vercel — set TURSO_DATABASE_URL "
+            "and TURSO_AUTH_TOKEN for durable storage."
+        ),
+    }
+
+
+def _turso_pipeline_url() -> str:
+    url = turso_url() or ""
+    if url.startswith("libsql://"):
+        url = "https://" + url[len("libsql://") :]
+    elif url.startswith("http://"):
+        url = "https://" + url[len("http://") :]
+    url = url.rstrip("/")
+    if not url.endswith("/v2/pipeline"):
+        url = url + "/v2/pipeline"
+    return url
+
+
+def _http_client() -> httpx.Client:
+    global _turso_client
+    if _turso_client is not None:
+        return _turso_client
+    with _turso_client_lock:
+        if _turso_client is None:
+            _turso_client = httpx.Client(timeout=60.0)
+        return _turso_client
+
+
+def _encode_turso_arg(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        # SQLite has no bool; store 0/1 like the local path.
+        return {"type": "integer", "value": str(int(value))}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"type": "integer", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+
+        return {
+            "type": "blob",
+            "base64": base64.b64encode(bytes(value)).decode("ascii"),
+        }
+    return {"type": "text", "value": str(value)}
+
+
+def _decode_turso_value(cell: Any) -> Any:
+    """Normalize a cell from the Turso v2 pipeline response."""
+    if cell is None:
+        return None
+    if isinstance(cell, dict):
+        # {"type":"text","value":"..."} or {"type":"null"}
+        t = cell.get("type")
+        if t == "null" or "value" not in cell and t != "blob":
+            return None
+        if t == "integer":
+            try:
+                return int(cell["value"])
+            except (TypeError, ValueError):
+                return cell.get("value")
+        if t == "float":
+            try:
+                return float(cell["value"])
+            except (TypeError, ValueError):
+                return cell.get("value")
+        if t == "blob":
+            return cell.get("base64")
+        return cell.get("value")
+    return cell
+
+
+class _DictRow(dict):
+    """dict that also allows sqlite3.Row-style ``row['col']`` access."""
+
+    pass
+
+
+class _TursoCursor:
+    def __init__(self, columns: list[str], rows: list[list[Any]], rowcount: int = -1):
+        self._columns = columns
+        self._rows = rows
+        self._i = 0
+        self.rowcount = rowcount
+
+    def fetchone(self) -> _DictRow | None:
+        if self._i >= len(self._rows):
+            return None
+        vals = self._rows[self._i]
+        self._i += 1
+        return _DictRow(zip(self._columns, vals))
+
+    def fetchall(self) -> list[_DictRow]:
+        out = []
+        while True:
+            row = self.fetchone()
+            if row is None:
+                break
+            out.append(row)
+        return out
+
+
+class TursoConnection:
+    """Minimal sqlite3-like connection over Turso's HTTP pipeline API."""
+
+    def __init__(self) -> None:
+        self._pipeline = _turso_pipeline_url()
+        self._token = turso_auth_token()
+        self._pending: list[dict[str, Any]] = []
+
+    def _headers(self) -> dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self._token:
+            h["Authorization"] = f"Bearer {self._token}"
+        return h
+
+    def _run_pipeline(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        body = {"requests": requests + [{"type": "close"}]}
+        try:
+            resp = _http_client().post(
+                self._pipeline, headers=self._headers(), json=body
+            )
+        except httpx.HTTPError as e:
+            raise RuntimeError(
+                f"Turso request failed: {type(e).__name__}: {e}. "
+                "Check TURSO_DATABASE_URL and network access."
+            ) from e
+        if resp.status_code >= 400:
+            snippet = (resp.text or "")[:400]
+            raise RuntimeError(
+                f"Turso HTTP {resp.status_code}: {snippet or 'no body'}. "
+                "Check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN."
+            )
+        try:
+            data = resp.json()
+        except Exception as e:
+            raise RuntimeError("Turso returned non-JSON response.") from e
+        results = data.get("results") or []
+        # Each result: {"type":"ok","response":{...}} or {"type":"error",...}
+        for item in results:
+            if item.get("type") == "error":
+                err = item.get("error") or item
+                raise RuntimeError(f"Turso SQL error: {err}")
+            # Nested error in ok response
+            resp_body = item.get("response") or {}
+            if isinstance(resp_body, dict) and resp_body.get("type") == "error":
+                raise RuntimeError(f"Turso SQL error: {resp_body.get('error')}")
+        return results
+
+    def _stmt(self, sql: str, params: Sequence[Any] = ()) -> dict[str, Any]:
+        stmt: dict[str, Any] = {"sql": sql}
+        if params:
+            stmt["args"] = [_encode_turso_arg(p) for p in params]
+        return {"type": "execute", "stmt": stmt}
+
+    def _parse_execute_result(self, item: dict[str, Any]) -> _TursoCursor:
+        # Shape (HTTP v2):
+        # { "type":"ok", "response": { "type":"execute", "result": { cols, rows, ... } } }
+        if item.get("type") == "error":
+            raise RuntimeError(f"Turso SQL error: {item.get('error')}")
+        response = item.get("response") or {}
+        if response.get("type") == "close":
+            return _TursoCursor([], [], 0)
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict):
+            return _TursoCursor([], [], 0)
+
+        cols_raw = result.get("cols") or []
+        columns: list[str] = []
+        for c in cols_raw:
+            if isinstance(c, dict):
+                columns.append(str(c.get("name") or ""))
+            else:
+                columns.append(str(c))
+
+        rows_out: list[list[Any]] = []
+        for row in result.get("rows") or []:
+            cells = row.get("values") if isinstance(row, dict) else row
+            rows_out.append([_decode_turso_value(c) for c in (cells or [])])
+
+        affected = result.get("affected_row_count")
+        if affected is None:
+            affected = -1
+        try:
+            rowcount = int(affected)
+        except (TypeError, ValueError):
+            rowcount = -1
+        return _TursoCursor(columns, rows_out, rowcount=rowcount)
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> _TursoCursor:
+        results = self._run_pipeline([self._stmt(sql, params)])
+        for item in results:
+            if item.get("type") == "error":
+                raise RuntimeError(f"Turso SQL error: {item.get('error')}")
+            resp = item.get("response") or {}
+            if resp.get("type") == "execute":
+                return self._parse_execute_result(item)
+        return _TursoCursor([], [], 0)
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> _TursoCursor:
+        if not seq_of_params:
+            return _TursoCursor([], [], 0)
+        reqs = [self._stmt(sql, params) for params in seq_of_params]
+        results = self._run_pipeline(reqs)
+        total = 0
+        for item in results:
+            cur = self._parse_execute_result(item)
+            if cur.rowcount and cur.rowcount > 0:
+                total += cur.rowcount
+        return _TursoCursor([], [], rowcount=total)
+
+    def executescript(self, script: str) -> None:
+        # Split on semicolons at line boundaries; skip empty / comment-only.
+        parts = re.split(r";\s*\n", script)
+        stmts = []
+        for part in parts:
+            s = part.strip()
+            if not s or s.startswith("--"):
+                continue
+            # Drop trailing semicolon
+            if s.endswith(";"):
+                s = s[:-1].strip()
+            if s:
+                stmts.append(s)
+        if not stmts:
+            return
+        # Batch in chunks to avoid huge payloads
+        chunk_size = 8
+        for i in range(0, len(stmts), chunk_size):
+            batch = stmts[i : i + chunk_size]
+            self._run_pipeline([self._stmt(s) for s in batch])
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _connect_sqlite() -> sqlite3.Connection:
     path = db_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Read-only parent — fall back to /tmp so the function still starts.
         path = Path("/tmp/studyquiz.db")
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -60,7 +382,13 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
+def _connect() -> Any:
+    if using_turso():
+        return TursoConnection()
+    return _connect_sqlite()
+
+
+def _ensure_schema(conn: Any) -> None:
     """Idempotent CREATE TABLE — safe to call on every cold start."""
     global _schema_ready
     if _schema_ready:
@@ -69,12 +397,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if _schema_ready:
             return
         conn.executescript(_SCHEMA_SQL)
-        conn.commit()
+        if hasattr(conn, "commit"):
+            conn.commit()
         _schema_ready = True
 
 
+def reset_connection_state() -> None:
+    """Drop thread-local connection and schema flag (tests / path switch)."""
+    global _schema_ready
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _local.conn = None
+    _schema_ready = False
+
+
 @contextmanager
-def connection() -> Iterator[sqlite3.Connection]:
+def connection() -> Iterator[Any]:
     """Per-thread connection (safe with uvicorn workers / reload)."""
     conn = getattr(_local, "conn", None)
     if conn is None:
@@ -83,9 +425,11 @@ def connection() -> Iterator[sqlite3.Connection]:
     _ensure_schema(conn)
     try:
         yield conn
-        conn.commit()
+        if hasattr(conn, "commit"):
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if hasattr(conn, "rollback"):
+            conn.rollback()
         raise
 
 
@@ -398,8 +742,15 @@ def update_exam_paper(exam_id: str, paper: dict) -> None:
             "UPDATE exam_papers SET paper_json = ? WHERE id = ?",
             (_dumps(paper), exam_id),
         )
-        if cur.rowcount == 0:
-            raise KeyError(exam_id)
+        # Prefer affected-row count when the backend reports it reliably.
+        rc = getattr(cur, "rowcount", None)
+        if rc == 0:
+            exists = conn.execute(
+                "SELECT 1 FROM exam_papers WHERE id = ?",
+                (exam_id,),
+            ).fetchone()
+            if exists is None:
+                raise KeyError(exam_id)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +842,7 @@ def list_eval_rows(*, phase: str | None = None) -> list[dict]:
     return [_eval_row_to_dict(r) for r in rows]
 
 
-def _eval_row_to_dict(row: sqlite3.Row) -> dict:
+def _eval_row_to_dict(row: Any) -> dict:
     return {
         "timestamp": row["timestamp"],
         "quiz_id": row["quiz_id"],

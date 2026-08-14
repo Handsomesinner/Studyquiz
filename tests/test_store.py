@@ -16,19 +16,15 @@ from app import store
 def tmp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db = tmp_path / "test.db"
     monkeypatch.setenv("STUDYQUIZ_DB", str(db))
-    # Reset thread-local connection + schema flag so a new path is used.
-    conn = getattr(store._local, "conn", None)
-    if conn is not None:
-        conn.close()
-    store._local.conn = None
-    store._schema_ready = False
+    # Ensure local SQLite path (no remote Turso during unit tests).
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    monkeypatch.delenv("LIBSQL_URL", raising=False)
+    monkeypatch.delenv("STUDYQUIZ_TURSO_URL", raising=False)
+    monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    store.reset_connection_state()
     store.init_db()
     yield db
-    conn = getattr(store._local, "conn", None)
-    if conn is not None:
-        conn.close()
-        store._local.conn = None
-    store._schema_ready = False
+    store.reset_connection_state()
 
 
 def _sample_question() -> QuizQuestion:
@@ -80,9 +76,7 @@ def test_document_survives_reconnect(tmp_db):
         chunks=["hello world " * 40, "second chunk about memory"],
     )
     # Simulate restart: drop connection
-    store._local.conn.close()
-    store._local.conn = None
-    store._schema_ready = False
+    store.reset_connection_state()
 
     doc = store.get_document("doc2")
     assert doc is not None
@@ -151,11 +145,63 @@ def test_eval_rows_persist(tmp_db):
             }
         ]
     )
-    store._local.conn.close()
-    store._local.conn = None
-    store._schema_ready = False
+    store.reset_connection_state()
 
     rows = store.list_eval_rows(phase="pre_filter")
     assert len(rows) == 1
     assert rows[0]["grounded"] is True
     assert rows[0]["use_rag"] is True
+
+
+def test_storage_info_local_sqlite(tmp_db):
+    info = store.storage_info()
+    assert info["backend"] == "sqlite"
+    assert info["durable"] is True
+    assert "test.db" in info["db_path"] or str(tmp_db) in info["db_path"]
+
+
+def test_storage_info_turso(monkeypatch):
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://studyquiz-demo.turso.io")
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", "fake-token")
+    store.reset_connection_state()
+    assert store.using_turso() is True
+    info = store.storage_info()
+    assert info["backend"] == "turso"
+    assert info["durable"] is True
+    assert "studyquiz-demo.turso.io" in info["host"]
+    store.reset_connection_state()
+
+
+def test_turso_arg_encoding():
+    assert store._encode_turso_arg(None) == {"type": "null"}
+    assert store._encode_turso_arg(3) == {"type": "integer", "value": "3"}
+    assert store._encode_turso_arg("hi") == {"type": "text", "value": "hi"}
+    assert store._decode_turso_value({"type": "text", "value": "hi"}) == "hi"
+    assert store._decode_turso_value({"type": "integer", "value": "7"}) == 7
+
+
+def test_exam_paper_roundtrip(tmp_db):
+    store.save_document(
+        doc_id="doc-exam",
+        title="sec.pdf",
+        text="security notes",
+        chunks=["security notes"],
+    )
+    store.save_exam_paper(
+        exam_id="exam1",
+        document_id="doc-exam",
+        use_rag=True,
+        topic=None,
+        difficulty="medium",
+        paper={"questions": [{"number": 1, "heading": "QUESTION ONE"}]},
+        context_chunks=["security notes"],
+    )
+    row = store.get_exam_paper("exam1")
+    assert row is not None
+    assert row["paper"]["questions"][0]["heading"] == "QUESTION ONE"
+    store.update_exam_paper(
+        "exam1",
+        {"questions": [{"number": 1, "heading": "QUESTION ONE", "guides": True}]},
+    )
+    row2 = store.get_exam_paper("exam1")
+    assert row2["paper"]["questions"][0]["guides"] is True

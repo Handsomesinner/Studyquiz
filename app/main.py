@@ -72,18 +72,20 @@ def home():
 @app.get("/api/health")
 def health():
     """Lightweight check used to confirm the serverless function boots."""
+    info = store.storage_info()
     try:
         store.init_db()
-        db = str(store.db_path())
         ok = True
         detail = "ok"
     except Exception as e:
         ok = False
-        db = str(store.db_path())
         detail = f"{type(e).__name__}: {e}"
     return {
         "status": "ok" if ok else "degraded",
-        "db_path": db,
+        "db_path": info["db_path"],
+        "storage": info,
+        "storage_backend": info["backend"],
+        "storage_durable": info["durable"],
         "serverless": store._running_serverless(),
         "detail": detail,
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),

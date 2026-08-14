@@ -587,6 +587,7 @@
       </div>
     </div>
     <div class="status" id="upload-status"></div>
+    <p class="hint hidden" id="storage-hint" style="margin-top:0.75rem"></p>
   </section>
 
   <section class="card hidden" id="options-card">
@@ -928,6 +929,34 @@ async function refreshDocumentList(selectId) {
   } catch (_) { /* ignore */ }
 }
 
+/** Show whether saved docs survive restarts (Turso vs /tmp SQLite). */
+async function loadStorageHint() {
+  const el = $("storage-hint");
+  if (!el) return;
+  try {
+    const h = await api("/api/health");
+    const durable = h.storage_durable !== false && (h.storage && h.storage.durable !== false);
+    const backend = h.storage_backend || (h.storage && h.storage.backend) || "sqlite";
+    if (backend === "turso" || durable) {
+      if (backend === "turso") {
+        el.textContent =
+          "Storage: durable (Turso) — saved documents survive deploys and cold starts.";
+        el.classList.remove("hidden");
+      } else {
+        el.classList.add("hidden");
+      }
+      return;
+    }
+    // Ephemeral serverless SQLite
+    el.textContent =
+      "Storage: temporary on this host — saved documents may disappear after idle time. " +
+      "For lasting storage, set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN on the deployment.";
+    el.classList.remove("hidden");
+  } catch (_) {
+    el.classList.add("hidden");
+  }
+}
+
 function selectDocument(id, title, detail) {
   docId = id;
   $("upload-status").className = "status";
@@ -936,6 +965,7 @@ function selectDocument(id, title, detail) {
 }
 
 refreshDocumentList();
+loadStorageHint();
 
 function pct(rate) {
   return `${Math.round((rate || 0) * 100)}%`;
