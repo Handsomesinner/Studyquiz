@@ -193,3 +193,29 @@ def filter_grounded(
             kept_q.append(q)
             kept_g.append(g)
     return kept_q, kept_g
+
+
+def resolve_grounded_serving(
+    questions: list[QuizQuestion],
+    groundings: list[QuestionGrounding],
+    *,
+    use_rag: bool,
+    require_grounding: bool,
+) -> tuple[list[QuizQuestion], list[QuestionGrounding], int, bool]:
+    """Apply require_grounding; never return empty when questions exist.
+
+    Returns ``(served_questions, served_groundings, filtered_out, best_effort)``.
+
+    When strict mode would drop every question, falls back to the full model
+    output with ``best_effort=True`` so the student still gets a quiz.
+    """
+    if not questions:
+        return [], [], 0, False
+    if not (use_rag and require_grounding):
+        return list(questions), list(groundings), 0, False
+
+    kept_q, kept_g = filter_grounded(questions, groundings)
+    filtered_out = len(questions) - len(kept_q)
+    if kept_q:
+        return kept_q, kept_g, filtered_out, False
+    return list(questions), list(groundings), 0, True

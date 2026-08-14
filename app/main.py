@@ -406,6 +406,35 @@ def _build_eval_rows(
     return rows
 
 
+def _generate_mcq_attempt(
+    *,
+    doc: dict,
+    num_questions: int,
+    plan,
+    context_batches: list,
+    topic: str | None,
+    use_rag: bool,
+    difficulty: str,
+    source_text: str,
+):
+    """One generation + grounding pass. Raises GenerationError on API failure."""
+    quiz = generator.generate_quiz_from_batches(
+        num_questions=num_questions,
+        doc_title=doc["title"],
+        context_batches=context_batches,
+        questions_per_batch=plan.questions_per_batch,
+        topic=topic,
+        use_rag=use_rag,
+        difficulty=difficulty,
+    )
+    pre_groundings, pre_metrics = grounding.validate_quiz(
+        quiz.questions,
+        source_text=source_text,
+        use_rag=use_rag,
+    )
+    return quiz, pre_groundings, pre_metrics
+
+
 @app.post("/api/quiz")
 def create_quiz(req: QuizRequest):
     doc = store.get_document(req.document_id)
@@ -428,43 +457,81 @@ def create_quiz(req: QuizRequest):
     source_text = doc.get("text") or "\n\n".join(doc["chunks"])
 
     try:
-        quiz = generator.generate_quiz_from_batches(
+        quiz, pre_groundings, pre_metrics = _generate_mcq_attempt(
+            doc=doc,
             num_questions=num_questions,
-            doc_title=doc["title"],
+            plan=plan,
             context_batches=context_batches,
-            questions_per_batch=plan.questions_per_batch,
             topic=req.topic,
             use_rag=req.use_rag,
             difficulty=req.difficulty,
+            source_text=source_text,
         )
     except generator.GenerationError as e:
         raise HTTPException(503, str(e))
 
-    # --- Grounding validation (automatic evaluation metric) ---
-    pre_groundings, pre_metrics = grounding.validate_quiz(
-        quiz.questions,
-        source_text=source_text,
-        use_rag=req.use_rag,
+    if not quiz.questions:
+        raise HTTPException(
+            503,
+            "The model returned no questions. Try again or use a longer document.",
+        )
+
+    served_questions, served_groundings, filtered_out, best_effort = (
+        grounding.resolve_grounded_serving(
+            quiz.questions,
+            pre_groundings,
+            use_rag=req.use_rag,
+            require_grounding=req.require_grounding,
+        )
     )
 
-    served_questions = list(quiz.questions)
-    served_groundings = list(pre_groundings)
-    filtered_out = 0
-
-    if req.use_rag and req.require_grounding:
-        served_questions, served_groundings = grounding.filter_grounded(
-            quiz.questions, pre_groundings
-        )
-        filtered_out = len(quiz.questions) - len(served_questions)
-        if not served_questions:
-            raise HTTPException(
-                503,
-                "No questions could be verified against the document "
-                f"(0/{len(quiz.questions)} quotes found in the source). "
-                "Try generating again, or turn off 'Require grounded quotes'.",
+    retried = False
+    # If strict grounding wiped the whole set, auto-retry generation once.
+    if best_effort and req.use_rag and req.require_grounding:
+        try:
+            quiz2, pre2, metrics2 = _generate_mcq_attempt(
+                doc=doc,
+                num_questions=num_questions,
+                plan=plan,
+                context_batches=context_batches,
+                topic=req.topic,
+                use_rag=req.use_rag,
+                difficulty=req.difficulty,
+                source_text=source_text,
             )
+            if quiz2.questions:
+                retried = True
+                s2, g2, f2, be2 = grounding.resolve_grounded_serving(
+                    quiz2.questions,
+                    pre2,
+                    use_rag=req.use_rag,
+                    require_grounding=req.require_grounding,
+                )
+                # Prefer any attempt that has verified questions; else keep retry output.
+                quiz, pre_groundings, pre_metrics = quiz2, pre2, metrics2
+                served_questions, served_groundings, filtered_out, best_effort = (
+                    s2,
+                    g2,
+                    f2,
+                    be2,
+                )
+        except generator.GenerationError:
+            # Keep first attempt (best-effort) rather than failing the student.
+            pass
 
     post_metrics = grounding.summarise(served_groundings, use_rag=req.use_rag)
+
+    warning = None
+    if best_effort:
+        total = len(served_questions)
+        grounded_n = sum(1 for g in served_groundings if g.grounded)
+        warning = (
+            "Could not verify source quotes for these questions"
+            f" ({grounded_n}/{total} matched the notes)"
+            + (" after one automatic retry. " if retried else ". ")
+            + "Serving best-effort questions — answers may be less tightly grounded. "
+            "You can generate again or turn off “Only keep questions verified against the notes”."
+        )
 
     quiz_id = uuid.uuid4().hex[:12]
     store.save_quiz(
@@ -518,6 +585,9 @@ def create_quiz(req: QuizRequest):
             "filtered_out": filtered_out,
             "pre_filter": pre_metrics.to_dict(),
             "served": post_metrics.to_dict(),
+            "retried": retried,
+            "best_effort": best_effort,
+            "warning": warning,
         },
     }
 

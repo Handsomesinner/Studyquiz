@@ -6,6 +6,7 @@ from app.grounding import (
     normalize_for_match,
     options_are_unique,
     quote_in_source,
+    resolve_grounded_serving,
     validate_question,
     validate_quiz,
 )
@@ -117,3 +118,58 @@ def test_filter_grounded_keeps_only_verified():
     kept_q, kept_g = filter_grounded(questions, groundings)
     assert len(kept_q) == 1
     assert kept_g[0].grounded is True
+
+
+def test_resolve_grounded_serving_partial_filter():
+    questions = [
+        _q("The round-robin algorithm uses a fixed time quantum."),
+        _q("Completely invented material about quantum foam."),
+    ]
+    groundings, _ = validate_quiz(questions, source_text=SOURCE, use_rag=True)
+    served_q, served_g, filtered, best = resolve_grounded_serving(
+        questions,
+        groundings,
+        use_rag=True,
+        require_grounding=True,
+    )
+    assert len(served_q) == 1
+    assert filtered == 1
+    assert best is False
+    assert served_g[0].grounded is True
+
+
+def test_resolve_grounded_serving_soft_fallback_when_none_grounded():
+    questions = [
+        _q("Hallucinated one never in notes."),
+        _q("Another invented claim about unicorns."),
+    ]
+    groundings, _ = validate_quiz(questions, source_text=SOURCE, use_rag=True)
+    assert all(not g.grounded for g in groundings)
+    served_q, served_g, filtered, best = resolve_grounded_serving(
+        questions,
+        groundings,
+        use_rag=True,
+        require_grounding=True,
+    )
+    # Soft fallback: still serve all questions, flag best_effort.
+    assert len(served_q) == 2
+    assert filtered == 0
+    assert best is True
+    assert len(served_g) == 2
+
+
+def test_resolve_grounded_serving_report_only_keeps_all():
+    questions = [
+        _q("The round-robin algorithm uses a fixed time quantum."),
+        _q("Completely invented material about quantum foam."),
+    ]
+    groundings, _ = validate_quiz(questions, source_text=SOURCE, use_rag=True)
+    served_q, _, filtered, best = resolve_grounded_serving(
+        questions,
+        groundings,
+        use_rag=True,
+        require_grounding=False,
+    )
+    assert len(served_q) == 2
+    assert filtered == 0
+    assert best is False

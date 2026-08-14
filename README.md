@@ -134,8 +134,10 @@ Use these endpoints:
 | `GET` | `/api/evaluation/export` | Download all rows as **CSV** for tables/graphs |
 
 Default RAG generation sets `require_grounding=true` (unverified questions are
-dropped). Untick that option in the UI to keep every model question and measure
-the raw failure rate — useful for ablation tables.
+dropped when some still pass). If **every** quote fails, StudyQuiz **retries
+once**, then serves a **best-effort** quiz with a warning instead of a hard
+error. Untick the option to keep every model question and measure the raw
+failure rate — useful for ablation tables.
 
 ## Scope / limitations (as stated in the proposal)
 

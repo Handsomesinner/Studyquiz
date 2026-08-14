@@ -968,13 +968,20 @@ function renderGroundingMetrics(g, el, retrieval) {
   if (g) {
     const pre = g.pre_filter || {};
     const served = g.served || {};
-    const mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
+    let mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
+    if (g.best_effort) mode = "best-effort (could not verify quotes — still served)";
     lines.push(
       `<strong>Grounding check</strong> — ${mode}`,
       `Model output: <strong>${pre.grounded_count ?? 0}</strong> / ${pre.total_questions ?? 0} quotes found (${pct(pre.quote_in_source_rate)})`
     );
+    if (g.retried) {
+      lines.push("Retried generation once after the first pass had no verified quotes.");
+    }
     if (g.filtered_out > 0) {
       lines.push(`Filtered out <strong>${g.filtered_out}</strong> unverified question(s); serving ${served.total_questions ?? 0}.`);
+    }
+    if (g.best_effort && g.warning) {
+      lines.push(`<span style="color:var(--warn)">${escapeHtml(g.warning)}</span>`);
     }
   }
   el.innerHTML = lines.join("<br>");
@@ -1647,7 +1654,14 @@ async function generateMcq() {
     reviewWrongOnly = false;
     renderQuiz(quiz.questions);
     renderGroundingMetrics(quiz.grounding, $("grounding-metrics"), quiz.retrieval);
-    status.textContent = "";
+    if (quiz.grounding && quiz.grounding.best_effort && quiz.grounding.warning) {
+      status.textContent = quiz.grounding.warning;
+      status.className = "status";
+      status.style.color = "var(--warn)";
+    } else {
+      status.textContent = "";
+      status.style.color = "";
+    }
     $("result-card").classList.add("hidden");
     $("exam-card").classList.add("hidden");
     $("mine-results-card").classList.add("hidden");
@@ -1662,7 +1676,9 @@ async function generateMcq() {
     hideSetupForResults();
     $("quiz-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
-    status.textContent = e.message; status.className = "status error";
+    status.textContent = e.message;
+    status.className = "status error";
+    status.style.color = "";
   } finally { $("generate-btn").disabled = false; }
 }
 
