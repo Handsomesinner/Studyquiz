@@ -1721,9 +1721,29 @@ async function generateExam() {
     const focusBit = focus
       ? `focus: <strong>${focus}</strong> · `
       : "";
-    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${focusBit}${exam.paper.questions.length} major question(s), ~${exam.total_marks} marks · <code>${strat}</code>`;
+    const gen = exam.generation || {};
+    const nGot = (exam.paper && exam.paper.questions && exam.paper.questions.length) || 0;
+    const nWant = gen.requested || (exam.retrieval && exam.retrieval.questions_requested) || nGot;
+    const countBit = gen.partial
+      ? `<strong>${nGot}</strong> of <strong>${nWant}</strong> major question(s)`
+      : `${nGot} major question(s)`;
+    m.innerHTML += `<br><strong>Exam Quiz</strong> — ${focusBit}${countBit}, ~${exam.total_marks} marks · <code>${strat}</code>`;
+    if (gen.partial && gen.message) {
+      m.innerHTML += `<br><span style="color:var(--warn)">${escapeHtml(gen.message)}</span>`;
+    }
+    if (gen.retried_slots && gen.retried_slots.length) {
+      m.innerHTML += `<br>Retried failed slot(s): ${gen.retried_slots.join(", ")}.`;
+    }
     m.classList.remove("hidden");
-    status.textContent = "";
+    const warn = exam.warning || (gen.partial && gen.message) || "";
+    if (warn) {
+      status.textContent = warn;
+      status.className = "status";
+      status.style.color = "var(--warn)";
+    } else {
+      status.textContent = "";
+      status.style.color = "";
+    }
     $("exam-answer-status").textContent = "";
     $("exam-answer-status").className = "status";
     $("quiz-card").classList.add("hidden");
@@ -1737,7 +1757,9 @@ async function generateExam() {
     hideSetupForResults();
     $("exam-card").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
-    status.textContent = e.message; status.className = "status error";
+    status.textContent = e.message;
+    status.className = "status error";
+    status.style.color = "";
   } finally { $("generate-btn").disabled = false; }
 }
 

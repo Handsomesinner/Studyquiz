@@ -379,6 +379,97 @@ Respond with structured fields only for this single question.
     return ExamQuestion(number=question_number, heading=heading, parts=parts)
 
 
+def _run_parallel_questions(
+    *,
+    indices: list[int],
+    num_questions: int,
+    doc_title: str,
+    slices: list[list[str]],
+    topic: str | None,
+    use_rag: bool,
+    difficulty: str,
+    questions: list[ExamQuestion | None],
+    errors: list[str],
+) -> None:
+    """Fill ``questions[i]`` for each i in ``indices`` (parallel). Mutates in place."""
+    if not indices:
+        return
+    workers = min(len(indices), 4)
+    with ThreadPoolExecutor(max_workers=workers) as pool_exec:
+        futures = {
+            pool_exec.submit(
+                _generate_one_question,
+                question_number=i + 1,
+                num_questions=num_questions,
+                doc_title=doc_title,
+                context_chunks=slices[i] if i < len(slices) else [],
+                topic=topic,
+                use_rag=use_rag,
+                difficulty=difficulty,
+            ): i
+            for i in indices
+        }
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                questions[idx] = fut.result()
+            except GenerationError as e:
+                errors.append(f"QUESTION {idx + 1}: {e}")
+            except Exception as e:
+                errors.append(f"QUESTION {idx + 1} failed: {e}")
+
+
+def build_exam_generation_meta(
+    *,
+    requested: int,
+    generated: int,
+    failed_slots: list[int],
+    retried_slots: list[int],
+    errors: list[str],
+) -> dict:
+    """Public meta for API/UI (partial papers no longer silent)."""
+    partial = generated < requested
+    missing = max(0, requested - generated)
+    if not partial:
+        message = None
+    elif generated == 0:
+        message = "No major questions could be generated. Try again."
+    else:
+        failed_labels = ", ".join(
+            f"QUESTION {ORDINALS[s - 1] if 1 <= s <= len(ORDINALS) else s}"
+            for s in failed_slots
+        ) or "some slots"
+        retry_note = (
+            " after one automatic retry"
+            if retried_slots
+            else ""
+        )
+        message = (
+            f"{generated} of {requested} major questions generated"
+            f" ({failed_labels} failed{retry_note}). "
+            "Generate again to fill the missing slot(s)."
+        )
+    return {
+        "requested": requested,
+        "generated": generated,
+        "missing_count": missing,
+        "partial": partial,
+        "failed_slots": list(failed_slots),
+        "retried_slots": list(retried_slots),
+        "errors": list(errors),
+        "message": message,
+    }
+
+
+def renumber_exam_questions(questions: list[ExamQuestion]) -> list[ExamQuestion]:
+    """Assign consecutive QUESTION ONE… headings after drops/retries."""
+    for i, q in enumerate(questions):
+        ordinal = ORDINALS[i] if i < len(ORDINALS) else str(i + 1)
+        q.number = i + 1
+        q.heading = f"QUESTION {ordinal}"
+    return questions
+
+
 def generate_exam_paper(
     *,
     num_questions: int,
@@ -392,8 +483,12 @@ def generate_exam_paper(
     time_allowed: str = "2 Hrs.",
     all_document_chunks: list[str] | None = None,
     retriever=None,
-) -> ExamPaper:
+) -> tuple[ExamPaper, dict]:
     """Build a full paper by generating major questions in parallel.
+
+    Returns ``(paper, generation_meta)``. Failed slots are retried once; if
+    still incomplete, the partial paper is returned with an honest meta
+    message (e.g. "3 of 4 generated") instead of silently shrinking.
 
     ``all_document_chunks`` (preferred) is sliced across questions for coverage.
     When ``topic`` + ``retriever`` are set, chunks are BM25-selected for that topic.
@@ -420,60 +515,71 @@ def generate_exam_paper(
 
     questions: list[ExamQuestion | None] = [None] * num_questions
     errors: list[str] = []
+    retried_slots: list[int] = []
 
-    # Parallel calls: wall time ≈ slowest single question.
-    workers = min(num_questions, 4)
-    with ThreadPoolExecutor(max_workers=workers) as pool_exec:
-        futures = {
-            pool_exec.submit(
-                _generate_one_question,
-                question_number=i + 1,
-                num_questions=num_questions,
-                doc_title=doc_title,
-                context_chunks=slices[i],
-                topic=topic_clean or None,
-                use_rag=use_rag,
-                difficulty=difficulty,
-            ): i
-            for i in range(num_questions)
-        }
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                questions[idx] = fut.result()
-            except GenerationError as e:
-                errors.append(str(e))
-            except Exception as e:
-                errors.append(f"QUESTION {idx + 1} failed: {e}")
+    # Pass 1 — all slots in parallel (wall time ≈ slowest single question).
+    _run_parallel_questions(
+        indices=list(range(num_questions)),
+        num_questions=num_questions,
+        doc_title=doc_title,
+        slices=slices,
+        topic=topic_clean or None,
+        use_rag=use_rag,
+        difficulty=difficulty,
+        questions=questions,
+        errors=errors,
+    )
 
+    # Pass 2 — retry only failed slots once.
+    failed_first = [i for i, q in enumerate(questions) if q is None]
+    if failed_first:
+        retried_slots = [i + 1 for i in failed_first]
+        # Drop stale errors for slots we are about to retry; keep others if any.
+        retry_errors: list[str] = []
+        _run_parallel_questions(
+            indices=failed_first,
+            num_questions=num_questions,
+            doc_title=doc_title,
+            slices=slices,
+            topic=topic_clean or None,
+            use_rag=use_rag,
+            difficulty=difficulty,
+            questions=questions,
+            errors=retry_errors,
+        )
+        errors.extend(retry_errors)
+
+    failed_final = [i + 1 for i, q in enumerate(questions) if q is None]
     cleaned = [q for q in questions if q is not None]
     if not cleaned:
         raise GenerationError(
             errors[0] if errors else "No exam questions were generated. Try again."
         )
-    # If some failed, still return partial paper (better than total failure).
-    # Renumber for a clean paper.
-    for i, q in enumerate(cleaned):
-        ordinal = ORDINALS[i] if i < len(ORDINALS) else str(i + 1)
-        q.number = i + 1
-        q.heading = f"QUESTION {ordinal}"
+
+    # Renumber only after retries so headings match the paper the student sees.
+    renumber_exam_questions(cleaned)
 
     instructions = [
         f"Answer Question One and Any Other {max(1, len(cleaned) - 1)} Question(s).",
         "No jotting is allowed on the Question Paper.",
         "Credit will be given for clarity, structure, and relevant examples.",
     ]
-    if errors and len(cleaned) < num_questions:
-        # Soft note for the student UI (not shown on printed header by default)
-        pass
 
-    return ExamPaper(
+    paper = ExamPaper(
         course_code=code,
         course_title=title,
         time_allowed=time_allowed or "2 Hrs.",
         instructions=instructions,
         questions=cleaned,
     )
+    meta = build_exam_generation_meta(
+        requested=num_questions,
+        generated=len(cleaned),
+        failed_slots=failed_final,
+        retried_slots=retried_slots,
+        errors=errors,
+    )
+    return paper, meta
 
 
 def _guess_code(doc_title: str) -> str:

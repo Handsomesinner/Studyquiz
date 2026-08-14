@@ -792,7 +792,7 @@ def create_exam(req: ExamRequest):
     )
 
     try:
-        paper = exam_generator.generate_exam_paper(
+        paper, gen_meta = exam_generator.generate_exam_paper(
             num_questions=num_questions,
             doc_title=doc["title"] or "Lecture material",
             context_chunks=all_chunks,
@@ -838,10 +838,14 @@ def create_exam(req: ExamRequest):
             "exam_strategy": strategy,
             "focus_topic": topic,
             "chunks_per_question": exam_generator.MAX_CHUNKS_PER_QUESTION,
+            "questions_requested": gen_meta.get("requested", num_questions),
             "questions_generated": len(paper.questions),
+            "partial": gen_meta.get("partial", False),
         },
+        "generation": gen_meta,
         "paper": paper_dict,
         "guides_deferred": True,
+        "warning": gen_meta.get("message"),
     }
 
 
