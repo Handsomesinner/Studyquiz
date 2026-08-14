@@ -628,14 +628,6 @@
         <button class="secondary" id="replace-doc-btn" type="button">Replace file</button>
         <button class="secondary danger-btn" id="delete-doc-btn" type="button">Delete</button>
       </div>
-      <div style="margin-top:0.85rem">
-        <label class="field-label" for="merge-docs">Course pack — merge several notes</label>
-        <select id="merge-docs" multiple size="4" style="width:100%;min-height:5.5rem"></select>
-        <p class="hint" style="margin-top:0.3rem">Hold Ctrl/Cmd to select 2+ documents, then merge into one index for a full semester pack.</p>
-        <div class="btn-row">
-          <button class="secondary" type="button" id="merge-docs-btn">Merge into course pack</button>
-        </div>
-      </div>
       <input type="file" id="replace-file" class="hidden" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
     </div>
     <div class="status" id="upload-status" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -1108,19 +1100,6 @@ async function refreshDocumentList(selectId) {
     });
     if (prev) sel.value = prev;
     $("previous-docs").classList.toggle("hidden", docs.length === 0);
-    // Multi-select for course pack merge
-    const merge = $("merge-docs");
-    if (merge) {
-      const selected = new Set(Array.from(merge.selectedOptions || []).map((o) => o.value));
-      merge.innerHTML = "";
-      docs.forEach((d) => {
-        const opt = document.createElement("option");
-        opt.value = d.id;
-        opt.textContent = `${d.title} (${d.num_chunks} chunks)`;
-        if (selected.has(d.id)) opt.selected = true;
-        merge.appendChild(opt);
-      });
-    }
   } catch (_) { /* ignore */ }
 }
 
@@ -1136,7 +1115,16 @@ async function loadTopicChips(documentId) {
       btn.type = "button";
       btn.className = "topic-chip";
       btn.textContent = t.topic;
-      btn.title = t.source === "heading" ? "From a heading in your notes" : "Frequent phrase in your notes";
+      const srcTips = {
+        heading: "Markdown heading",
+        bold: "Bold heading line",
+        chapter: "Chapter / section label",
+        numbered: "Numbered outline heading",
+        caps: "ALL-CAPS heading",
+        title_case: "Title-style heading line",
+        standalone: "Standalone heading explained below",
+      };
+      btn.title = srcTips[t.source] || "Heading from your notes";
       btn.onclick = () => {
         $("topic").value = t.topic;
         holder.querySelectorAll(".topic-chip").forEach((c) => c.classList.remove("active"));
@@ -2782,45 +2770,6 @@ selectDocument = function(id, title, detail) {
   _selectDocument(id, title, detail);
   refreshDueHint();
 };
-
-if ($("merge-docs-btn")) {
-  $("merge-docs-btn").onclick = async () => {
-    const merge = $("merge-docs");
-    const status = $("upload-status");
-    const ids = Array.from(merge.selectedOptions || []).map((o) => o.value).filter(Boolean);
-    if (ids.length < 2) {
-      status.textContent = "Select at least two documents to merge.";
-      status.className = "status error";
-      return;
-    }
-    const title = window.prompt(
-      "Name for this course pack:",
-      "Course pack (" + ids.length + " files)"
-    );
-    if (title === null) return;
-    $("merge-docs-btn").disabled = true;
-    status.className = "status";
-    status.textContent = "Merging into one searchable pack…";
-    try {
-      const pack = await api("/api/documents/merge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_ids: ids, title: title || null }),
-      });
-      selectDocument(
-        pack.id,
-        pack.title,
-        `Course pack ready: “${pack.title}” — ${pack.num_words.toLocaleString()} words in ${pack.num_chunks} chunks (from ${pack.source_ids.length} files).`
-      );
-      await refreshDocumentList(pack.id);
-    } catch (e) {
-      status.textContent = e.message;
-      status.className = "status error";
-    } finally {
-      $("merge-docs-btn").disabled = false;
-    }
-  };
-}
 
 // Hide harder-distractors on exam mode
 const _setModeQuality = setMode;

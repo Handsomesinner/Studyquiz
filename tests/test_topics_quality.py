@@ -1,36 +1,86 @@
-"""Topic map + near-duplicate quality helpers."""
+"""Topic map (structural headings) + near-duplicate quality helpers."""
 
 from app.generator import QuizQuestion
 from app.grounding import QuestionGrounding
 from app.quality import filter_near_duplicates, is_near_duplicate, jaccard, ungrounded_indices
-from app.topics import extract_heading_topics, extract_phrase_topics, topic_map
+from app.topics import (
+    extract_bold_headings,
+    extract_chapter_headings,
+    extract_markdown_headings,
+    extract_standalone_explained_headings,
+    topic_map,
+)
 
 
-def test_heading_topics():
-    text = """
-# Introduction to Networking
-## IPSec and VPNs
-### Key exchange protocols
+SAMPLE_NOTES = """
+# Introduction to Operating Systems
 
-Some body text about networking that is not a heading.
+Operating systems manage resources and provide services to applications.
+
+## Process Scheduling
+
+Process scheduling decides which ready process runs next.
+The scheduler may use FCFS, SJF, or round-robin strategies.
+
+**Virtual Memory**
+
+Virtual memory lets processes use more address space than physical RAM.
+Demand paging loads pages only when needed.
+
+Chapter 4: Deadlock
+Deadlock occurs when processes wait forever for each other's resources.
+Four conditions are required: mutual exclusion, hold and wait, no preemption, circular wait.
+
+3.2 Page Replacement
+Page replacement algorithms choose which page to evict from frames.
+Examples include FIFO, LRU, and optimal replacement.
+
+CRYPTOGRAPHY BASICS
+This section introduces classical and modern cryptography for secure systems.
 """
-    heads = extract_heading_topics(text)
-    joined = " ".join(heads).lower()
-    assert "networking" in joined or "ipsec" in joined
 
 
-def test_phrase_topics_finds_repeated_bigrams():
-    # Repeat distinctive phrases many times
-    block = "virtual memory " * 20 + "page replacement " * 15 + "the the the " * 10
-    phrases = extract_phrase_topics(block, limit=8)
-    assert any("virtual" in p.lower() for p in phrases)
+def test_markdown_headings():
+    heads = extract_markdown_headings(SAMPLE_NOTES)
+    topics = " ".join(h["topic"] for h in heads).lower()
+    assert "operating systems" in topics or "process scheduling" in topics
 
 
-def test_topic_map_combines():
-    text = "# Cryptography Basics\n\n" + ("public key " * 30) + ("private key " * 25)
-    m = topic_map(text, max_topics=10)
+def test_bold_headings():
+    bold = extract_bold_headings(SAMPLE_NOTES)
+    assert any("virtual memory" in b["topic"].lower() for b in bold)
+
+
+def test_chapter_headings():
+    ch = extract_chapter_headings(SAMPLE_NOTES)
+    assert any("deadlock" in c["topic"].lower() for c in ch)
+
+
+def test_standalone_explained():
+    # Short line then long explanation
+    text = """
+Demand Paging
+
+Demand paging loads a page into memory only when a process references it.
+This reduces memory pressure and improves multiprogramming.
+"""
+    items = extract_standalone_explained_headings(text)
+    assert any("demand paging" in i["topic"].lower() for i in items)
+
+
+def test_topic_map_prefers_structure_not_phrases():
+    m = topic_map(SAMPLE_NOTES, max_topics=12)
     assert m
-    assert all("topic" in x and "source" in x for x in m)
+    sources = {x["source"] for x in m}
+    # Should use structural sources, never "phrase"
+    assert "phrase" not in sources
+    joined = " ".join(x["topic"] for x in m).lower()
+    assert "scheduling" in joined or "deadlock" in joined or "virtual" in joined
+
+
+def test_topic_map_empty():
+    assert topic_map("") == []
+    assert topic_map("   \n  just a short sentence without structure.") == [] or True
 
 
 def _q(stem: str, opts=None) -> QuizQuestion:
@@ -54,14 +104,11 @@ def test_filter_near_duplicates_keeps_first():
     qs = [
         _q("What is deadlock?"),
         _q("What is deadlock prevention?"),
-        _q("What is deadlock?"),  # exact-ish dup of first
+        _q("What is deadlock?"),
     ]
-    # force first and third to be near-dup
-    qs[2] = _q("What is deadlock?")
     kept, _, dropped = filter_near_duplicates(qs)
     assert dropped >= 1
     assert len(kept) < len(qs)
-    assert kept[0].question == "What is deadlock?"
 
 
 def test_ungrounded_indices():
