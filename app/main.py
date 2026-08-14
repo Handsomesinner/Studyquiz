@@ -810,6 +810,9 @@ def create_exam(req: ExamRequest):
 
     exam_id = uuid.uuid4().hex[:12]
     paper_dict = paper.model_dump()
+    # Soft quote badges on every part (never drop exam content).
+    source_text = doc.get("text") or "\n\n".join(all_chunks)
+    paper_dict = grounding.annotate_exam_paper_dict(paper_dict, source_text)
     # Store a compact sample of context used (first slice) for debugging only.
     sample_ctx = exam_generator.assign_chunk_slices(all_chunks, 1)[0] if all_chunks else []
     store.save_exam_paper(
@@ -844,6 +847,7 @@ def create_exam(req: ExamRequest):
         },
         "generation": gen_meta,
         "paper": paper_dict,
+        "grounding": paper_dict.get("grounding_summary"),
         "guides_deferred": True,
         "warning": gen_meta.get("message"),
     }
@@ -873,6 +877,7 @@ def get_exam(exam_id: str):
         "topic": row["topic"],
         "total_marks": total,
         "paper": paper,
+        "grounding": (paper or {}).get("grounding_summary"),
         "created_at": row["created_at"],
         "guides_ready": has_guides,
     }
@@ -913,6 +918,8 @@ def generate_exam_answers(exam_id: str):
         raise HTTPException(503, str(e))
 
     paper_dict = filled.model_dump()
+    source_text = doc.get("text") or "\n\n".join(doc["chunks"])
+    paper_dict = grounding.annotate_exam_paper_dict(paper_dict, source_text)
     try:
         store.update_exam_paper(exam_id, paper_dict)
     except KeyError:
@@ -925,6 +932,7 @@ def generate_exam_answers(exam_id: str):
         "guides_ready": True,
         "total_marks": total,
         "paper": paper_dict,
+        "grounding": paper_dict.get("grounding_summary"),
         "message": (
             "Marking guides and model-answer outlines are ready. "
             "Compare them with what you wrote — they are based on your uploaded notes."
@@ -1070,6 +1078,11 @@ async def answer_from_notes_endpoint(request: Request):
         raise HTTPException(503, str(e))
 
     ok_count = sum(1 for a in answers if not a.error)
+    source_text = doc.get("text") or "\n\n".join(doc["chunks"])
+    answer_dicts = [a.model_dump() for a in answers]
+    answer_dicts, g_summary = grounding.annotate_note_answers(
+        answer_dicts, source_text
+    )
     return {
         "mode": "my_questions",
         "document_id": document_id,
@@ -1079,5 +1092,6 @@ async def answer_from_notes_endpoint(request: Request):
         "answered_ok": ok_count,
         "truncated": truncated,
         "max_questions": answer_from_notes.MAX_QUESTIONS,
-        "answers": [a.model_dump() for a in answers],
+        "answers": answer_dicts,
+        "grounding": g_summary,
     }

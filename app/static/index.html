@@ -396,11 +396,14 @@
   .explain q { font-style: italic; color: var(--muted); }
   .badge {
     display: inline-block; font-size: 0.7rem; font-weight: 700; border-radius: 999px;
-    padding: 0.18rem 0.6rem; margin-top: 0.5rem; letter-spacing: 0.02em;
+    padding: 0.18rem 0.55rem; margin-top: 0.35rem; margin-right: 0.35rem;
+    letter-spacing: 0.02em; vertical-align: middle;
   }
   .badge.ok { background: var(--ok-soft); color: var(--ok); }
   .badge.bad { background: var(--wrong-soft); color: var(--wrong); }
   .badge.base { background: var(--warn-soft); color: var(--warn); }
+  .badge.partial { background: var(--warn-soft); color: var(--warn); }
+  .grounding-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; margin-top: 0.35rem; }
 
   .scoreband {
     text-align: center; padding: 1.5rem 1rem 1rem;
@@ -1451,6 +1454,18 @@ function formatAnswerHtml(text) {
   return blocks.map((b) => `<p>${b.trim()}</p>`).join("");
 }
 
+/** Soft grounding badge HTML: verified | partial | not_found */
+function softGroundingBadgeHtml(g, escFn) {
+  if (!g) return "";
+  const esc = escFn || ((s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  )));
+  const st = g.status || "";
+  const cls = st === "verified" ? "ok" : st === "not_found" ? "bad" : "partial";
+  const label = g.label || st || "—";
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
 function renderMineAnswers(payload) {
   const holder = $("mine-answers");
   holder.innerHTML = "";
@@ -1459,10 +1474,16 @@ function renderMineAnswers(payload) {
   summary.className = "hint";
   const parsed = payload.parsed_count != null ? payload.parsed_count : answers.length;
   const ok = payload.answered_ok != null ? payload.answered_ok : answers.length;
-  summary.textContent =
+  let sumText =
     `Found ${parsed} question${parsed === 1 ? "" : "s"}` +
     (payload.truncated ? ` (showing first ${payload.max_questions})` : "") +
     ` · answered ${ok} of ${answers.length}`;
+  const gs = payload.grounding;
+  if (gs && gs.total_answers) {
+    sumText +=
+      ` · quotes: ${gs.verified || 0} verified · ${gs.partial || 0} partial · ${gs.not_found || 0} not found`;
+  }
+  summary.textContent = sumText;
   holder.appendChild(summary);
 
   answers.forEach((a, i) => {
@@ -1471,6 +1492,12 @@ function renderMineAnswers(payload) {
     const h = document.createElement("h3");
     h.textContent = `${i + 1}. ${a.question || ""}`;
     card.appendChild(h);
+    if (a.grounding) {
+      const row = document.createElement("div");
+      row.className = "grounding-inline";
+      row.innerHTML = softGroundingBadgeHtml(a.grounding);
+      card.appendChild(row);
+    }
     if (a.error) {
       const err = document.createElement("div");
       err.className = "status error";
@@ -1497,8 +1524,25 @@ function renderMineAnswers(payload) {
     card.appendChild(full);
     if (a.source_quotes && a.source_quotes.length) {
       const qwrap = document.createElement("div");
-      qwrap.style.cssText = "margin-top:0.65rem;font-size:0.85rem;color:var(--muted);font-style:italic";
-      qwrap.textContent = "From the notes: “" + a.source_quotes.join("” · “") + "”";
+      qwrap.style.cssText = "margin-top:0.65rem;font-size:0.85rem;color:var(--muted)";
+      const gQuotes = a.quote_groundings || [];
+      a.source_quotes.forEach((q, qi) => {
+        const line = document.createElement("div");
+        line.style.marginTop = "0.35rem";
+        line.style.fontStyle = "italic";
+        const badge = gQuotes[qi]
+          ? softGroundingBadgeHtml(gQuotes[qi])
+          : "";
+        line.innerHTML =
+          `${badge}<span> From the notes: “${escapeHtml(q)}”</span>`;
+        qwrap.appendChild(line);
+      });
+      card.appendChild(qwrap);
+    } else if (a.grounding && a.grounding.label === "No quote") {
+      const qwrap = document.createElement("div");
+      qwrap.className = "grounding-inline";
+      qwrap.style.marginTop = "0.5rem";
+      qwrap.innerHTML = softGroundingBadgeHtml(a.grounding);
       card.appendChild(qwrap);
     }
     // Summary — collapsible quick recap
@@ -1734,6 +1778,13 @@ async function generateExam() {
     if (gen.retried_slots && gen.retried_slots.length) {
       m.innerHTML += `<br>Retried failed slot(s): ${gen.retried_slots.join(", ")}.`;
     }
+    const eg = exam.grounding || (exam.paper && exam.paper.grounding_summary);
+    if (eg && eg.total_parts) {
+      m.innerHTML +=
+        `<br><strong>Quote check (soft)</strong> — ${eg.verified || 0} verified · ` +
+        `${eg.partial || 0} partial · ${eg.not_found || 0} not found ` +
+        `(${eg.total_parts} parts; parts are never dropped)`;
+    }
     m.classList.remove("hidden");
     const warn = exam.warning || (gen.partial && gen.message) || "";
     if (warn) {
@@ -1856,8 +1907,14 @@ function renderExamPaper(exam) {
       if (!hasOutline && !hasPoints) {
         html += `<em>No answer guide yet. Click “Generate answers from my notes” after you attempt this part.</em>`;
       }
-      if (part.source_quote) {
-        html += `<div class="exam-quote">From material: “${esc(part.source_quote)}”</div>`;
+      const g = part.grounding;
+      if (part.source_quote || g) {
+        html += `<div class="exam-quote grounding-inline">`;
+        if (g) html += softGroundingBadgeHtml(g, esc);
+        if (part.source_quote) {
+          html += `<span>From material: “${esc(part.source_quote)}”</span>`;
+        }
+        html += `</div>`;
       }
       html += `</div></div>`;
     });
@@ -1894,7 +1951,13 @@ $("gen-answers-btn").onclick = async () => {
     guidesVisible = true;
     renderExamPaper(exam);
     st.className = "status";
-    st.textContent = exam.message || "Answers ready — compare with what you wrote.";
+    let msg = exam.message || "Answers ready — compare with what you wrote.";
+    const eg = exam.grounding || (exam.paper && exam.paper.grounding_summary);
+    if (eg && eg.total_parts) {
+      msg +=
+        ` Quote check: ${eg.verified || 0} verified · ${eg.partial || 0} partial · ${eg.not_found || 0} not found.`;
+    }
+    st.textContent = msg;
     $("toggle-guides-btn").disabled = false;
     $("toggle-guides-btn").textContent = "Hide answers / marking guide";
     $("gen-answers-btn").textContent = "Regenerate answers from notes";

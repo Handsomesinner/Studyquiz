@@ -2,11 +2,15 @@
 
 from app.generator import QuizQuestion
 from app.grounding import (
+    aggregate_soft_badges,
+    annotate_exam_paper_dict,
+    annotate_note_answer_dict,
     filter_grounded,
     normalize_for_match,
     options_are_unique,
     quote_in_source,
     resolve_grounded_serving,
+    soft_badge_for_quote,
     validate_question,
     validate_quiz,
 )
@@ -173,3 +177,81 @@ def test_resolve_grounded_serving_report_only_keeps_all():
     assert len(served_q) == 2
     assert filtered == 0
     assert best is False
+
+
+def test_soft_badge_verified_and_not_found():
+    ok = soft_badge_for_quote(
+        "The round-robin algorithm uses a fixed time quantum.",
+        SOURCE,
+    )
+    assert ok["status"] == "verified"
+    assert ok["grounded"] is True
+    bad = soft_badge_for_quote("Invented claim about unicorns and rainbows.", SOURCE)
+    assert bad["status"] == "not_found"
+    empty = soft_badge_for_quote("", SOURCE)
+    assert empty["status"] == "partial"
+    assert empty["label"] == "No quote"
+    short = soft_badge_for_quote("short", SOURCE)
+    assert short["status"] == "partial"
+
+
+def test_annotate_exam_paper_never_drops_parts():
+    paper = {
+        "questions": [
+            {
+                "number": 1,
+                "heading": "QUESTION ONE",
+                "parts": [
+                    {
+                        "label": "a",
+                        "prompt": "Discuss RR",
+                        "marks": 5,
+                        "source_quote": "The round-robin algorithm uses a fixed time quantum.",
+                    },
+                    {
+                        "label": "b",
+                        "prompt": "Invented",
+                        "marks": 3,
+                        "source_quote": "This quote is totally not in the lecture notes.",
+                    },
+                    {
+                        "label": "c",
+                        "prompt": "No cite",
+                        "marks": 2,
+                        "source_quote": "",
+                    },
+                ],
+            }
+        ]
+    }
+    out = annotate_exam_paper_dict(paper, SOURCE)
+    parts = out["questions"][0]["parts"]
+    assert len(parts) == 3  # never dropped
+    assert parts[0]["grounding"]["status"] == "verified"
+    assert parts[1]["grounding"]["status"] == "not_found"
+    assert parts[2]["grounding"]["status"] == "partial"
+    summary = out["grounding_summary"]
+    assert summary["total_parts"] == 3
+    assert summary["verified"] == 1
+    assert summary["not_found"] == 1
+    assert summary["partial"] == 1
+
+
+def test_annotate_note_answer_aggregate_partial():
+    ans = {
+        "question": "What is RR?",
+        "full_answer": "…",
+        "source_quotes": [
+            "The round-robin algorithm uses a fixed time quantum.",
+            "Completely invented material about quantum foam.",
+        ],
+    }
+    out = annotate_note_answer_dict(ans, SOURCE)
+    assert len(out["quote_groundings"]) == 2
+    assert out["quote_groundings"][0]["status"] == "verified"
+    assert out["quote_groundings"][1]["status"] == "not_found"
+    assert out["grounding"]["status"] == "partial"
+    # Aggregate helper alone
+    agg = aggregate_soft_badges(out["quote_groundings"])
+    assert agg["status"] == "partial"
+    assert agg["verified_count"] == 1
