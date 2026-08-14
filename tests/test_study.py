@@ -175,21 +175,13 @@ def test_exam_attempt_roundtrip(tmp_db):
     assert d2["answers"]["1-a"] == "Updated"
 
 
-def test_mixed_and_share(tmp_db):
-    store.save_document(doc_id="d4", title="m.pdf", text="z", chunks=["z"])
-    store.save_mixed_paper(
-        mixed_id="mx1",
-        document_id="d4",
-        title="Mix",
-        config={"sections": [{"type": "mcq", "quiz_id": "q"}]},
-    )
-    m = store.get_mixed_paper("mx1")
-    assert m["title"] == "Mix"
+def test_share_token(tmp_db):
     store.save_share_token(
         token="tok1",
-        resource_type="mixed",
-        resource_id="mx1",
+        resource_type="quiz",
+        resource_id="qz1",
         password_hash=None,
     )
     s = store.get_share_token("tok1")
-    assert s["resource_id"] == "mx1"
+    assert s["resource_type"] == "quiz"
+    assert s["resource_id"] == "qz1"

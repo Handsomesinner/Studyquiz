@@ -1,4 +1,4 @@
-"""Spaced-repetition helpers (light SM-2) for weak MCQ / flashcards."""
+"""Spaced-repetition helpers (light SM-2) for weak MCQ re-quiz."""
 
 from __future__ import annotations
 

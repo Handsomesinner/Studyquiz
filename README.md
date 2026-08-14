@@ -15,13 +15,11 @@ evaluation chapter to compare grounded vs ungrounded question quality.
 
 | Mode | What you get | Scoring |
 |------|----------------|---------|
-| **MCQ Quiz** | Multiple-choice items with 4 options; weak-area re-quiz + flashcards | Automatic |
+| **MCQ Quiz** | Multiple-choice items with 4 options; weak-area re-quiz | Automatic |
 | **Exam Quiz** | Nigerian-style theory paper with in-browser writing + marking guides | Self-check (not auto-marked) |
 | **My questions** | Past papers from paste/upload; savable banks; answers from notes | Self-check |
-| **Cards** | Flashcards (stem + reveal) with spaced repetition | Self-grade |
-| **Mixed** | Section A MCQ + Section B theory from the same notes | MCQ auto + theory self-check |
 
-**Share links:** after generate, copy `?quiz=` / `?exam=` / `?mixed=` (or create a `?share=` token). Classmates can take without re-uploading notes when storage is durable (Turso).
+**Share links:** after generate, copy `?quiz=` / `?exam=` (or create a `?share=` token). Classmates can take without re-uploading notes when storage is durable (Turso).
 
 Exam Quiz mirrors written BSc papers (Discuss / Define / Explain with mark
 allocations), so students can prepare for exams the way lecturers actually set

@@ -59,9 +59,7 @@ _PROTECTED_PREFIXES = (
     "/api/answer-from-notes",
     "/api/evaluation",
     "/api/study",
-    "/api/flashcards",
     "/api/banks",
-    "/api/mixed",
     "/api/share",
 )
 
@@ -87,8 +85,6 @@ def require_access_pin(request: Request) -> None:
     if method == "PUT" and "/draft" in path and path.startswith("/api/exam/"):
         return
     if method == "POST" and path.startswith("/api/exam/") and path.endswith("/submit-writing"):
-        return
-    if method == "GET" and path.startswith("/api/mixed/"):
         return
     if method == "GET" and path.startswith("/api/share/"):
         return
@@ -1248,7 +1244,7 @@ async def answer_from_notes_endpoint(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Study loop — safe quiz load, SRS, banks, mixed, share
+# Study loop — safe quiz load, SRS, banks, share
 # ---------------------------------------------------------------------------
 
 
@@ -1488,102 +1484,6 @@ def quiz_from_wrong(req: QuizFromWrongRequest):
     }
 
 
-class FlashFromQuizRequest(BaseModel):
-    quiz_id: str
-
-
-@app.post("/api/flashcards/from-quiz")
-def flashcards_from_quiz(req: FlashFromQuizRequest):
-    quiz = store.get_quiz(req.quiz_id)
-    if quiz is None:
-        raise HTTPException(404, "Quiz not found.")
-    doc_id = quiz.get("doc_id")
-    if not doc_id:
-        raise HTTPException(400, "Quiz has no document.")
-    from . import study as study_mod
-
-    n = 0
-    for q in quiz["questions"]:
-        fp = study_mod.fingerprint_question(q.question)
-        back = q.options[q.correct_index] if q.options else ""
-        if q.explanation:
-            back = f"{back}\n\n{q.explanation}".strip()
-        payload = {
-            "question": q.question,
-            "front": q.question,
-            "back": back,
-            "options": list(q.options),
-            "correct_index": q.correct_index,
-            "explanation": q.explanation or "",
-            "source_quote": q.source_quote or "",
-        }
-        existing = store.get_srs_card_by_fingerprint(doc_id, fp)
-        store.upsert_srs_card(
-            card_id=(existing["id"] if existing else uuid.uuid4().hex[:12]),
-            document_id=doc_id,
-            fingerprint=fp,
-            card_type="qa",
-            payload=payload,
-            ease=existing["ease"] if existing else 2.5,
-            interval_days=0 if not existing else existing["interval_days"],
-            due_at=study_mod.utc_now().isoformat()
-            if not existing
-            else existing["due_at"],
-            reps=existing["reps"] if existing else 0,
-            lapses=existing["lapses"] if existing else 0,
-        )
-        n += 1
-    return {"document_id": doc_id, "cards_added": n, "due_count": store.count_due_srs_cards(doc_id)}
-
-
-class FlashFromMineRequest(BaseModel):
-    document_id: str
-    answers: list[dict]
-
-
-@app.post("/api/flashcards/from-mine")
-def flashcards_from_mine(req: FlashFromMineRequest):
-    if store.get_document(req.document_id) is None:
-        raise HTTPException(404, "Document not found.")
-    from . import study as study_mod
-
-    n = 0
-    for a in req.answers or []:
-        if a.get("error"):
-            continue
-        q = str(a.get("question") or "").strip()
-        if not q:
-            continue
-        outline = a.get("outline") or []
-        full = (a.get("full_answer") or "").strip()
-        back = "\n".join(f"• {x}" for x in outline) if outline else full[:800]
-        fp = study_mod.fingerprint_question(q)
-        payload = {
-            "question": q,
-            "front": q,
-            "back": back or "(no answer)",
-            "source_quotes": a.get("source_quotes") or [],
-        }
-        existing = store.get_srs_card_by_fingerprint(req.document_id, fp)
-        store.upsert_srs_card(
-            card_id=(existing["id"] if existing else uuid.uuid4().hex[:12]),
-            document_id=req.document_id,
-            fingerprint=fp,
-            card_type="qa",
-            payload=payload,
-            ease=2.5,
-            interval_days=0,
-            due_at=study_mod.utc_now().isoformat(),
-            reps=0,
-            lapses=0,
-        )
-        n += 1
-    return {
-        "document_id": req.document_id,
-        "cards_added": n,
-        "due_count": store.count_due_srs_cards(req.document_id),
-    }
-
 
 # --- Exam writing ---
 
@@ -1701,165 +1601,12 @@ def rename_bank(bank_id: str, body: BankRename):
     return {"id": bank_id, "title": body.title.strip()}
 
 
-# --- Mixed paper ---
-
-
-class MixedRequest(BaseModel):
-    document_id: str
-    title: str | None = None
-    num_mcq: int = 5
-    num_exam_questions: int = 2
-    topic: str | None = None
-    difficulty: str = "medium"
-    use_rag: bool = True
-    require_grounding: bool = True
-    course_code: str | None = None
-    course_title: str | None = None
-    # Or attach existing:
-    quiz_id: str | None = None
-    exam_id: str | None = None
-
-
-@app.post("/api/mixed")
-def create_mixed(req: MixedRequest):
-    doc = store.get_document(req.document_id)
-    if doc is None:
-        raise HTTPException(404, "Document not found.")
-
-    quiz_id = (req.quiz_id or "").strip() or None
-    exam_id = (req.exam_id or "").strip() or None
-
-    # Generate MCQ section if needed
-    if not quiz_id:
-        qr = QuizRequest(
-            document_id=req.document_id,
-            num_questions=max(1, min(req.num_mcq, 10)),
-            topic=req.topic,
-            use_rag=req.use_rag,
-            require_grounding=req.require_grounding,
-            difficulty=req.difficulty,
-        )
-        quiz_payload = create_quiz(qr)
-        quiz_id = quiz_payload["quiz_id"]
-    else:
-        if store.get_quiz(quiz_id) is None:
-            raise HTTPException(404, "quiz_id not found.")
-
-    if not exam_id:
-        er = ExamRequest(
-            document_id=req.document_id,
-            num_questions=max(2, min(req.num_exam_questions, 4)),
-            topic=req.topic,
-            use_rag=req.use_rag,
-            difficulty=req.difficulty,
-            course_code=req.course_code,
-            course_title=req.course_title,
-        )
-        exam_payload = create_exam(er)
-        exam_id = exam_payload["exam_id"]
-        exam_paper = exam_payload.get("paper")
-        exam_total = exam_payload.get("total_marks")
-        exam_warning = exam_payload.get("warning")
-    else:
-        row = store.get_exam_paper(exam_id)
-        if row is None:
-            raise HTTPException(404, "exam_id not found.")
-        exam_paper = row["paper"]
-        exam_total = 0
-        exam_warning = None
-
-    quiz = store.get_quiz(quiz_id)
-    mixed_id = uuid.uuid4().hex[:12]
-    title = (req.title or "").strip() or "Mixed practice paper"
-    config = {
-        "title": title,
-        "sections": [
-            {
-                "type": "mcq",
-                "quiz_id": quiz_id,
-                "label": "Section A — Multiple choice",
-            },
-            {
-                "type": "exam",
-                "exam_id": exam_id,
-                "label": "Section B — Theory",
-            },
-        ],
-    }
-    store.save_mixed_paper(
-        mixed_id=mixed_id,
-        document_id=req.document_id,
-        title=title,
-        config=config,
-    )
-    return {
-        "mixed_id": mixed_id,
-        "title": title,
-        "document_id": req.document_id,
-        "config": config,
-        "quiz": {
-            "quiz_id": quiz_id,
-            "questions": [
-                {"index": i, "question": q.question, "options": list(q.options)}
-                for i, q in enumerate(quiz["questions"])
-            ]
-            if quiz
-            else [],
-        },
-        "exam": {
-            "exam_id": exam_id,
-            "paper": exam_paper,
-            "total_marks": exam_total,
-            "warning": exam_warning,
-        },
-    }
-
-
-@app.get("/api/mixed/{mixed_id}")
-def get_mixed(mixed_id: str):
-    row = store.get_mixed_paper(mixed_id)
-    if row is None:
-        raise HTTPException(404, "Mixed paper not found.")
-    config = row["config"]
-    quiz_id = None
-    exam_id = None
-    for s in config.get("sections") or []:
-        if s.get("type") == "mcq":
-            quiz_id = s.get("quiz_id")
-        if s.get("type") == "exam":
-            exam_id = s.get("exam_id")
-    quiz_out = None
-    if quiz_id:
-        q = store.get_quiz(quiz_id)
-        if q:
-            quiz_out = {
-                "quiz_id": quiz_id,
-                "questions": [
-                    {"index": i, "question": qq.question, "options": list(qq.options)}
-                    for i, qq in enumerate(q["questions"])
-                ],
-            }
-    exam_out = None
-    if exam_id:
-        e = store.get_exam_paper(exam_id)
-        if e:
-            exam_out = {"exam_id": exam_id, "paper": e["paper"]}
-    return {
-        "mixed_id": mixed_id,
-        "title": row["title"],
-        "document_id": row["document_id"],
-        "config": config,
-        "quiz": quiz_out,
-        "exam": exam_out,
-        "created_at": row["created_at"],
-    }
-
 
 # --- Share ---
 
 
 class ShareCreate(BaseModel):
-    resource_type: str  # quiz | exam | mixed
+    resource_type: str  # quiz | exam
     resource_id: str
     password: str | None = None
 
@@ -1870,14 +1617,12 @@ def create_share(req: ShareCreate):
 
     rtype = (req.resource_type or "").strip().lower()
     rid = (req.resource_id or "").strip()
-    if rtype not in ("quiz", "exam", "mixed"):
-        raise HTTPException(400, "resource_type must be quiz, exam, or mixed.")
+    if rtype not in ("quiz", "exam"):
+        raise HTTPException(400, "resource_type must be quiz or exam.")
     if rtype == "quiz" and store.get_quiz(rid) is None:
         raise HTTPException(404, "Quiz not found.")
     if rtype == "exam" and store.get_exam_paper(rid) is None:
         raise HTTPException(404, "Exam not found.")
-    if rtype == "mixed" and store.get_mixed_paper(rid) is None:
-        raise HTTPException(404, "Mixed paper not found.")
     token = uuid.uuid4().hex[:16]
     pw_hash = None
     if req.password and req.password.strip():
