@@ -152,6 +152,9 @@ the raw failure rate — useful for ablation tables.
 |---|---|---|
 | `POST` | `/api/documents` | Upload and index a document |
 | `GET` | `/api/documents` | List indexed documents |
+| `PATCH` | `/api/documents/{id}` | Rename document (`{ "title" }`) |
+| `PUT` | `/api/documents/{id}` | Replace file / re-index (same id; multipart or Blob URL) |
+| `DELETE` | `/api/documents/{id}` | Delete document and linked quizzes / exams |
 | `POST` | `/api/quiz` | Generate MCQ quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`, `difficulty`) |
 | `POST` | `/api/quiz/{id}/submit` | Grade submitted MCQ answers |
 | `POST` | `/api/exam` | Generate theory **Exam Quiz** paper (`num_questions` major questions, `course_code`, `course_title`, …) |

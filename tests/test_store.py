@@ -205,3 +205,109 @@ def test_exam_paper_roundtrip(tmp_db):
     )
     row2 = store.get_exam_paper("exam1")
     assert row2["paper"]["questions"][0]["guides"] is True
+
+
+def test_rename_document(tmp_db):
+    store.save_document(
+        doc_id="doc-r",
+        title="old.pdf",
+        text="hello",
+        chunks=["hello"],
+    )
+    assert store.rename_document("doc-r", "  Course notes  ") is True
+    doc = store.get_document("doc-r")
+    assert doc["title"] == "Course notes"
+    assert store.rename_document("missing", "x") is False
+
+
+def test_replace_document_keeps_id(tmp_db):
+    store.save_document(
+        doc_id="doc-rep",
+        title="v1.pdf",
+        text="version one",
+        chunks=["version one"],
+    )
+    assert store.replace_document(
+        doc_id="doc-rep",
+        title="v2.pdf",
+        text="version two about paging",
+        chunks=["version two about paging", "more paging"],
+    )
+    doc = store.get_document("doc-rep")
+    assert doc is not None
+    assert doc["id"] == "doc-rep"
+    assert doc["title"] == "v2.pdf"
+    assert len(doc["chunks"]) == 2
+    assert "paging" in doc["text"]
+    assert store.replace_document(
+        doc_id="nope", title="x", text="y", chunks=["y"]
+    ) is False
+
+
+def test_delete_document_cascades(tmp_db):
+    store.save_document(
+        doc_id="doc-del",
+        title="gone.pdf",
+        text="delete me",
+        chunks=["delete me"],
+    )
+    q = _sample_question()
+    g = _sample_grounding()
+    store.save_quiz(
+        quiz_id="quiz-del",
+        document_id="doc-del",
+        use_rag=True,
+        topic=None,
+        questions=[q],
+        groundings=[g],
+        pre_filter_metrics={},
+        served_metrics={},
+        context_chunks=["delete me"],
+    )
+    store.save_attempt(
+        attempt_id="att-del",
+        quiz_id="quiz-del",
+        answers=[0],
+        score=1,
+        total=1,
+        results=[{"correct": True}],
+    )
+    store.save_exam_paper(
+        exam_id="exam-del",
+        document_id="doc-del",
+        use_rag=True,
+        topic=None,
+        difficulty="medium",
+        paper={"questions": []},
+        context_chunks=[],
+    )
+    store.append_eval_rows(
+        [
+            {
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "quiz_id": "quiz-del",
+                "document_id": "doc-del",
+                "document_title": "gone.pdf",
+                "use_rag": True,
+                "topic": "",
+                "phase": "served",
+                "question_index": 0,
+                "question": "Q?",
+                "options": "A | B | C | D",
+                "correct_index": 0,
+                "source_quote": "x",
+                "grounded": True,
+                "match_type": "exact",
+                "options_unique": True,
+                "expected_grounded": True,
+            }
+        ]
+    )
+
+    assert store.delete_document("doc-del") is True
+    assert store.get_document("doc-del") is None
+    assert store.get_quiz("quiz-del") is None
+    assert store.get_exam_paper("exam-del") is None
+    assert store.list_eval_rows() == []
+    assert store.delete_document("doc-del") is False
+    assert store.list_documents() == []

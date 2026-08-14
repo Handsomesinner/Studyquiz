@@ -288,6 +288,14 @@
   }
   .btn-row { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; margin-top: 0.35rem; }
   .btn-row button, .btn-row a { margin-top: 0.55rem; }
+  button.danger-btn {
+    border-color: color-mix(in srgb, var(--wrong) 35%, var(--line));
+    color: var(--wrong);
+  }
+  button.danger-btn:hover {
+    border-color: var(--wrong);
+    background: var(--wrong-soft);
+  }
 
   .toggle {
     display: flex; align-items: flex-start; gap: 0.55rem; margin-top: 0.95rem;
@@ -582,12 +590,15 @@
       <select id="doc-select">
         <option value="">Choose a previous upload…</option>
       </select>
-      <div class="btn-row">
+      <div class="btn-row doc-actions">
         <button class="secondary" id="use-doc-btn" type="button">Use selected</button>
+        <button class="secondary" id="rename-doc-btn" type="button">Rename</button>
+        <button class="secondary" id="replace-doc-btn" type="button">Replace file</button>
+        <button class="secondary danger-btn" id="delete-doc-btn" type="button">Delete</button>
       </div>
+      <input type="file" id="replace-file" class="hidden" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
     </div>
     <div class="status" id="upload-status"></div>
-    <p class="hint hidden" id="storage-hint" style="margin-top:0.75rem"></p>
   </section>
 
   <section class="card hidden" id="options-card">
@@ -929,34 +940,6 @@ async function refreshDocumentList(selectId) {
   } catch (_) { /* ignore */ }
 }
 
-/** Show whether saved docs survive restarts (Turso vs /tmp SQLite). */
-async function loadStorageHint() {
-  const el = $("storage-hint");
-  if (!el) return;
-  try {
-    const h = await api("/api/health");
-    const durable = h.storage_durable !== false && (h.storage && h.storage.durable !== false);
-    const backend = h.storage_backend || (h.storage && h.storage.backend) || "sqlite";
-    if (backend === "turso" || durable) {
-      if (backend === "turso") {
-        el.textContent =
-          "Storage: durable (Turso) — saved documents survive deploys and cold starts.";
-        el.classList.remove("hidden");
-      } else {
-        el.classList.add("hidden");
-      }
-      return;
-    }
-    // Ephemeral serverless SQLite
-    el.textContent =
-      "Storage: temporary on this host — saved documents may disappear after idle time. " +
-      "For lasting storage, set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN on the deployment.";
-    el.classList.remove("hidden");
-  } catch (_) {
-    el.classList.add("hidden");
-  }
-}
-
 function selectDocument(id, title, detail) {
   docId = id;
   $("upload-status").className = "status";
@@ -965,7 +948,6 @@ function selectDocument(id, title, detail) {
 }
 
 refreshDocumentList();
-loadStorageHint();
 
 function pct(rate) {
   return `${Math.round((rate || 0) * 100)}%`;
@@ -1252,16 +1234,179 @@ $("upload-btn").onclick = async () => {
   } finally { $("upload-btn").disabled = false; }
 };
 
-$("use-doc-btn").onclick = () => {
+function selectedDocId() {
+  return ($("doc-select").value || "").trim();
+}
+
+function selectedDocTitleLabel() {
   const sel = $("doc-select");
-  const id = sel.value;
+  if (!sel.value) return "";
+  // Option text is "title (N chunks)" — strip the suffix for prompts.
+  return (sel.options[sel.selectedIndex].textContent || "")
+    .replace(/\s*\(\d+\s*chunks?\)\s*$/i, "")
+    .trim();
+}
+
+$("use-doc-btn").onclick = () => {
+  const id = selectedDocId();
   if (!id) {
     $("upload-status").textContent = "Pick a saved document first.";
     $("upload-status").className = "status error";
     return;
   }
-  const title = sel.options[sel.selectedIndex].textContent;
+  const title = selectedDocTitleLabel() || id;
   selectDocument(id, title, `Using saved document: ${title}`);
+};
+
+$("rename-doc-btn").onclick = async () => {
+  const id = selectedDocId();
+  const status = $("upload-status");
+  if (!id) {
+    status.textContent = "Pick a saved document first.";
+    status.className = "status error";
+    return;
+  }
+  const current = selectedDocTitleLabel() || "";
+  const next = window.prompt("New name for this document:", current);
+  if (next === null) return;
+  const title = next.trim();
+  if (!title) {
+    status.textContent = "Name cannot be empty.";
+    status.className = "status error";
+    return;
+  }
+  try {
+    status.className = "status";
+    status.textContent = "Renaming…";
+    const res = await api(`/api/documents/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (docId === id) {
+      selectDocument(id, res.title, `Renamed to "${res.title}".`);
+    } else {
+      status.textContent = `Renamed to "${res.title}".`;
+    }
+    await refreshDocumentList(id);
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = "status error";
+  }
+};
+
+$("delete-doc-btn").onclick = async () => {
+  const id = selectedDocId();
+  const status = $("upload-status");
+  if (!id) {
+    status.textContent = "Pick a saved document first.";
+    status.className = "status error";
+    return;
+  }
+  const title = selectedDocTitleLabel() || id;
+  if (!window.confirm(`Delete "${title}"?\n\nQuizzes and exam papers linked to it will also be removed.`)) {
+    return;
+  }
+  try {
+    status.className = "status";
+    status.textContent = "Deleting…";
+    await api(`/api/documents/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (docId === id) {
+      docId = null;
+      $("options-card").classList.add("hidden");
+    }
+    status.textContent = `Deleted "${title}".`;
+    await refreshDocumentList();
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = "status error";
+  }
+};
+
+$("replace-doc-btn").onclick = () => {
+  const id = selectedDocId();
+  if (!id) {
+    $("upload-status").textContent = "Pick a saved document first.";
+    $("upload-status").className = "status error";
+    return;
+  }
+  $("replace-file").value = "";
+  $("replace-file").click();
+};
+
+$("replace-file").onchange = async () => {
+  const id = selectedDocId();
+  const status = $("upload-status");
+  const file = $("replace-file").files && $("replace-file").files[0];
+  if (!id || !file) return;
+  if (file.size > MAX_UPLOAD_BYTES) {
+    status.textContent = `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Max is ${MAX_UPLOAD_MB} MB.`;
+    status.className = "status error";
+    return;
+  }
+  const title = selectedDocTitleLabel() || id;
+  if (!window.confirm(`Replace "${title}" with "${file.name}"?\n\nThe document id stays the same; content is re-indexed.`)) {
+    $("replace-file").value = "";
+    return;
+  }
+
+  $("replace-doc-btn").disabled = true;
+  $("upload-btn").disabled = true;
+  status.className = "status";
+  try {
+    let doc;
+    if (file.size > BLOB_THRESHOLD_BYTES) {
+      try {
+        const { url, filename } = await putFileToBlob(file, status, "notes");
+        status.textContent = "Re-indexing document…";
+        doc = await api(`/api/documents/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, filename }),
+        });
+      } catch (blobErr) {
+        const hint = blobConfigErrorMessage(blobErr);
+        if (hint) throw new Error(hint);
+        throw blobErr;
+      }
+    } else {
+      try {
+        status.textContent = "Replacing file…";
+        const form = new FormData();
+        form.append("file", file);
+        doc = await api(`/api/documents/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          body: form,
+        });
+      } catch (multiErr) {
+        const msg = String(multiErr.message || multiErr);
+        if (msg.includes("4 MB") || msg.includes("413") || msg.includes("Blob")) {
+          const { url, filename } = await putFileToBlob(file, status, "notes");
+          status.textContent = "Re-indexing document…";
+          doc = await api(`/api/documents/${encodeURIComponent(id)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, filename }),
+          });
+        } else {
+          throw multiErr;
+        }
+      }
+    }
+    selectDocument(
+      doc.id,
+      doc.title,
+      `Replaced with "${doc.title}" — ${doc.num_words.toLocaleString()} words in ${doc.num_chunks} chunks.`
+    );
+    await refreshDocumentList(doc.id);
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = "status error";
+  } finally {
+    $("replace-doc-btn").disabled = false;
+    $("upload-btn").disabled = false;
+    $("replace-file").value = "";
+  }
 };
 
 $("generate-btn").onclick = async () => {

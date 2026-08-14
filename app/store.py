@@ -591,6 +591,87 @@ def list_documents() -> list[dict]:
     return out
 
 
+def document_exists(doc_id: str) -> bool:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT 1 AS ok FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+    return row is not None
+
+
+def rename_document(doc_id: str, title: str) -> bool:
+    """Update display title. Returns False if the document does not exist."""
+    title = (title or "").strip() or "untitled"
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            "UPDATE documents SET title = ? WHERE id = ?",
+            (title, doc_id),
+        )
+    return True
+
+
+def replace_document(
+    *,
+    doc_id: str,
+    title: str,
+    text: str,
+    chunks: list[str],
+) -> bool:
+    """Re-index an existing document id with new file content. Keeps the same id."""
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            """
+            UPDATE documents
+            SET title = ?, text = ?, chunks_json = ?
+            WHERE id = ?
+            """,
+            (title or "untitled", text, _dumps(chunks), doc_id),
+        )
+    return True
+
+
+def delete_document(doc_id: str) -> bool:
+    """Delete a document and related quizzes, attempts, exams, and eval rows.
+
+    Foreign keys are not ON DELETE CASCADE in the schema, so children are
+    removed explicitly (works for both local SQLite and Turso).
+    """
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if exists is None:
+            return False
+
+        quiz_rows = conn.execute(
+            "SELECT id FROM quizzes WHERE document_id = ?",
+            (doc_id,),
+        ).fetchall()
+        for qrow in quiz_rows:
+            qid = qrow["id"]
+            conn.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", (qid,))
+
+        conn.execute("DELETE FROM quizzes WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM exam_papers WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM eval_rows WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Quizzes
 # ---------------------------------------------------------------------------

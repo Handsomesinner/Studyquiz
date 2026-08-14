@@ -98,8 +98,17 @@ def health():
     }
 
 
-def _index_document_bytes(filename: str, data: bytes) -> dict:
-    """Extract, chunk, and persist a document from raw bytes."""
+def _index_document_bytes(
+    filename: str,
+    data: bytes,
+    *,
+    replace_doc_id: str | None = None,
+) -> dict:
+    """Extract, chunk, and persist a document from raw bytes.
+
+    When ``replace_doc_id`` is set, re-indexes that existing document in place
+    (same id) instead of creating a new row.
+    """
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             413,
@@ -135,20 +144,33 @@ def _index_document_bytes(filename: str, data: bytes) -> dict:
             "and the pages are readable.",
         )
 
-    doc_id = uuid.uuid4().hex[:12]
     title = filename or "untitled"
-    store.save_document(
-        doc_id=doc_id,
-        title=title,
-        text=text,
-        chunks=chunks,
-    )
+    if replace_doc_id:
+        if not store.replace_document(
+            doc_id=replace_doc_id,
+            title=title,
+            text=text,
+            chunks=chunks,
+        ):
+            raise HTTPException(404, "Document not found. Upload it again.")
+        doc_id = replace_doc_id
+        replaced = True
+    else:
+        doc_id = uuid.uuid4().hex[:12]
+        store.save_document(
+            doc_id=doc_id,
+            title=title,
+            text=text,
+            chunks=chunks,
+        )
+        replaced = False
     return {
         "id": doc_id,
         "title": title,
         "num_chunks": len(chunks),
         "num_words": len(text.split()),
         "ocr_used": ocr_used,
+        "replaced": replaced,
     }
 
 
@@ -260,6 +282,79 @@ async def upload_document(request: Request):
 @app.get("/api/documents")
 def list_documents():
     return store.list_documents()
+
+
+class DocumentRename(BaseModel):
+    title: str
+
+
+@app.patch("/api/documents/{doc_id}")
+def rename_document(doc_id: str, body: DocumentRename):
+    """Rename a saved document (display title only)."""
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(400, "Title is required.")
+    if len(title) > 300:
+        raise HTTPException(400, "Title is too long (max 300 characters).")
+    if not store.rename_document(doc_id, title):
+        raise HTTPException(404, "Document not found.")
+    return {"id": doc_id, "title": title}
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Delete a document and related quizzes / exam papers / eval rows."""
+    if not store.delete_document(doc_id):
+        raise HTTPException(404, "Document not found.")
+    return {"ok": True, "id": doc_id}
+
+
+@app.put("/api/documents/{doc_id}")
+async def replace_document(doc_id: str, request: Request):
+    """Replace file content for an existing document (same id, re-chunked).
+
+    Accepts the same body styles as POST /api/documents:
+    multipart ``file`` or JSON ``{url, filename}`` after Blob upload.
+    """
+    if not store.document_exists(doc_id):
+        raise HTTPException(404, "Document not found. Upload it again.")
+
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    if "application/json" in content_type:
+        try:
+            payload = DocumentFromUrl.model_validate(await request.json())
+        except Exception:
+            raise HTTPException(
+                400,
+                "JSON body must include a string 'url' (and optional 'filename').",
+            )
+        data = _download_url_to_bytes(payload.url)
+        filename = payload.filename or _filename_from_url(payload.url)
+        return _index_document_bytes(
+            filename, data, replace_doc_id=doc_id
+        )
+
+    form = await request.form()
+    file = form.get("file")
+    if file is None or not hasattr(file, "read"):
+        raise HTTPException(
+            400,
+            "Expected multipart field 'file', or JSON {url, filename} after "
+            "Vercel Blob client upload.",
+        )
+    data = await file.read()
+    filename = getattr(file, "filename", None) or "upload.bin"
+    if (
+        store._running_serverless()
+        and len(data) > DIRECT_MULTIPART_SAFE_BYTES
+    ):
+        raise HTTPException(
+            413,
+            "On Vercel, files over ~4 MB must use Blob client upload "
+            "(the UI does this automatically when BLOB_READ_WRITE_TOKEN is set).",
+        )
+    return _index_document_bytes(filename, data, replace_doc_id=doc_id)
 
 
 class QuizRequest(BaseModel):
