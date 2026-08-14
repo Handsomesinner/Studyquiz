@@ -560,10 +560,13 @@
     </p>
   </header>
 
-  <div class="mode-switch no-print" role="tablist" aria-label="Study mode">
-    <button type="button" id="mode-mcq" class="active" data-mode="mcq">Quick quiz</button>
-    <button type="button" id="mode-exam" data-mode="exam">Exam paper</button>
-    <button type="button" id="mode-mine" data-mode="mine">My questions</button>
+  <div class="mode-switch no-print" role="tablist" aria-label="Study mode" id="mode-tablist">
+    <button type="button" role="tab" id="mode-mcq" class="active" data-mode="mcq"
+      aria-selected="true" aria-controls="setup-panel" tabindex="0">Quick quiz</button>
+    <button type="button" role="tab" id="mode-exam" data-mode="exam"
+      aria-selected="false" aria-controls="setup-panel" tabindex="-1">Exam paper</button>
+    <button type="button" role="tab" id="mode-mine" data-mode="mine"
+      aria-selected="false" aria-controls="setup-panel" tabindex="-1">My questions</button>
   </div>
 
 <main>
@@ -601,7 +604,7 @@
       </div>
       <input type="file" id="replace-file" class="hidden" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
     </div>
-    <div class="status" id="upload-status"></div>
+    <div class="status" id="upload-status" role="status" aria-live="polite" aria-atomic="true"></div>
   </section>
 
   <section class="card hidden" id="options-card">
@@ -691,7 +694,7 @@ Or paste any past-question list…"></textarea>
       </div>
     </div>
 
-    <div class="status" id="generate-status"></div>
+    <div class="status" id="generate-status" role="status" aria-live="polite" aria-atomic="true"></div>
     <details class="session-details no-print">
       <summary>Session details</summary>
       <div class="metrics hidden" id="grounding-metrics"></div>
@@ -732,7 +735,9 @@ Or paste any past-question list…"></textarea>
           <span id="progress-text">Answered 0 of 0</span>
           <span id="current-q-hint"></span>
         </div>
-        <div class="progress-bar" aria-hidden="true"><span id="progress-fill"></span></div>
+        <div class="progress-bar" id="progress-bar" role="progressbar"
+          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+          aria-label="Quiz answer progress"><span id="progress-fill"></span></div>
       </div>
       <div id="timer-display" class="timer hidden" aria-live="polite">—</div>
     </div>
@@ -753,7 +758,7 @@ Or paste any past-question list…"></textarea>
       <button class="secondary" id="review-all-btn" type="button">Show all</button>
       <button class="secondary" id="print-results-btn" type="button">Print results</button>
       <button class="secondary" id="copy-summary-btn" type="button">Copy score</button>
-      <a class="button-link" id="export-csv" href="/api/evaluation/export">Export CSV</a>
+      <button class="secondary" id="export-csv" type="button">Export CSV</button>
     </div>
   </section>
 
@@ -839,21 +844,94 @@ function errorDetail(body, status) {
   return `Request failed (${status})`;
 }
 
+const PIN_STORAGE_KEY = "sq-access-pin";
+
+function getAccessPin() {
+  try {
+    return sessionStorage.getItem(PIN_STORAGE_KEY) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function setAccessPin(pin) {
+  try {
+    if (pin) sessionStorage.setItem(PIN_STORAGE_KEY, pin);
+    else sessionStorage.removeItem(PIN_STORAGE_KEY);
+  } catch (_) { /* private mode */ }
+}
+
+function ensureAccessPinInteractive() {
+  let pin = getAccessPin();
+  if (pin) return pin;
+  pin = window.prompt(
+    "This deployment requires an access PIN (STUDYQUIZ_ACCESS_PIN).\nEnter PIN:"
+  );
+  if (pin == null || !String(pin).trim()) return "";
+  pin = String(pin).trim();
+  setAccessPin(pin);
+  return pin;
+}
+
 async function api(path, options) {
-  const res = await fetch(path, options);
+  options = options || {};
+  const headers = new Headers(options.headers || {});
+  let pin = getAccessPin();
+  // Only attach pin for API routes (not needed for static)
+  if (path.startsWith("/api/") && path !== "/api/health") {
+    if (!pin && window.__sqAuthRequired) {
+      pin = ensureAccessPinInteractive();
+    }
+    if (pin) headers.set("X-StudyQuiz-Pin", pin);
+  }
+  const res = await fetch(path, { ...options, headers });
   const body = await res.json().catch(() => ({}));
+  if (res.status === 401 && path.startsWith("/api/")) {
+    // Wrong or missing PIN — clear and re-prompt once
+    setAccessPin("");
+    window.__sqAuthRequired = true;
+    const again = ensureAccessPinInteractive();
+    if (again) {
+      headers.set("X-StudyQuiz-Pin", again);
+      const retry = await fetch(path, { ...options, headers });
+      const retryBody = await retry.json().catch(() => ({}));
+      if (!retry.ok) throw new Error(errorDetail(retryBody, retry.status));
+      return retryBody;
+    }
+    throw new Error(errorDetail(body, res.status));
+  }
   if (!res.ok) throw new Error(errorDetail(body, res.status));
   return body;
 }
+
+/** Discover whether the deploy requires a PIN (from health). */
+async function loadAuthHint() {
+  try {
+    const h = await fetch("/api/health").then((r) => r.json());
+    window.__sqAuthRequired = !!h.auth_required;
+  } catch (_) {
+    window.__sqAuthRequired = false;
+  }
+}
+loadAuthHint();
 
 function setMode(mode) {
   if (mode === "exam") appMode = "exam";
   else if (mode === "mine") appMode = "mine";
   else appMode = "mcq";
 
-  $("mode-mcq").classList.toggle("active", appMode === "mcq");
-  $("mode-exam").classList.toggle("active", appMode === "exam");
-  $("mode-mine").classList.toggle("active", appMode === "mine");
+  const tabs = [
+    { id: "mode-mcq", mode: "mcq" },
+    { id: "mode-exam", mode: "exam" },
+    { id: "mode-mine", mode: "mine" },
+  ];
+  tabs.forEach(({ id, mode: m }) => {
+    const btn = $(id);
+    const on = appMode === m;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+  });
 
   const isExam = appMode === "exam";
   const isMine = appMode === "mine";
@@ -911,6 +989,29 @@ function setMode(mode) {
 $("mode-mcq").onclick = () => setMode("mcq");
 $("mode-exam").onclick = () => setMode("exam");
 $("mode-mine").onclick = () => setMode("mine");
+
+// Keyboard support for study-mode tabs (arrow keys / Home / End)
+(function initModeTabs() {
+  const tablist = $("mode-tablist");
+  if (!tablist) return;
+  const order = ["mode-mcq", "mode-exam", "mode-mine"];
+  const modes = { "mode-mcq": "mcq", "mode-exam": "exam", "mode-mine": "mine" };
+  tablist.addEventListener("keydown", (e) => {
+    const i = order.indexOf(document.activeElement && document.activeElement.id);
+    if (i < 0) return;
+    let next = -1;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (i + 1) % order.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (i - 1 + order.length) % order.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = order.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    const id = order[next];
+    setMode(modes[id]);
+    $(id).focus();
+  });
+})();
+
 setMode("mcq");
 
 $("setup-toggle-btn").onclick = () => {
@@ -1003,7 +1104,16 @@ function updateProgress() {
   const answered = countAnswered();
   const total = questionCount;
   $("progress-text").textContent = `Answered ${answered} of ${total}`;
-  $("progress-fill").style.width = total ? `${(answered / total) * 100}%` : "0%";
+  const pctVal = total ? Math.round((answered / total) * 100) : 0;
+  $("progress-fill").style.width = `${pctVal}%`;
+  const bar = $("progress-bar");
+  if (bar) {
+    bar.setAttribute("aria-valuenow", String(pctVal));
+    bar.setAttribute(
+      "aria-valuetext",
+      total ? `Answered ${answered} of ${total}` : "No questions"
+    );
+  }
   $("current-q-hint").textContent = total ? (answered === total ? "Ready to submit" : `${total - answered} left`) : "";
 }
 
@@ -2108,6 +2218,47 @@ $("review-wrong-btn").onclick = () => { reviewWrongOnly = true; applyReviewFilte
 $("review-all-btn").onclick = () => { reviewWrongOnly = false; applyReviewFilter(); };
 $("print-quiz-btn").onclick = () => window.print();
 $("print-results-btn").onclick = () => window.print();
+
+$("export-csv").onclick = async () => {
+  const btn = $("export-csv");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  try {
+    const headers = new Headers();
+    let pin = getAccessPin();
+    if (!pin && window.__sqAuthRequired) pin = ensureAccessPinInteractive();
+    if (pin) headers.set("X-StudyQuiz-Pin", pin);
+    let res = await fetch("/api/evaluation/export", { headers });
+    if (res.status === 401) {
+      setAccessPin("");
+      window.__sqAuthRequired = true;
+      pin = ensureAccessPinInteractive();
+      if (!pin) throw new Error("Access PIN required to export evaluation CSV.");
+      headers.set("X-StudyQuiz-Pin", pin);
+      res = await fetch("/api/evaluation/export", { headers });
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(errorDetail(body, res.status));
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "studyquiz_evaluation.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    btn.textContent = "Downloaded";
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  } catch (e) {
+    alert(e.message || String(e));
+    btn.textContent = prev;
+  } finally {
+    btn.disabled = false;
+  }
+};
 
 $("copy-summary-btn").onclick = async () => {
   if (!lastResult) return;

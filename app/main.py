@@ -33,6 +33,7 @@ from . import (
     generator,
     grounding,
     pdf_processor,
+    security,
     store,
 )
 from .retriever import BM25Retriever
@@ -49,6 +50,55 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
 MAX_EXTRACTED_CHARS = int(os.getenv("MAX_EXTRACTED_CHARS", "5000000"))
 # Direct multipart is only reliable under the Vercel body limit when live.
 DIRECT_MULTIPART_SAFE_BYTES = 4 * 1024 * 1024
+
+# Routes that burn Anthropic credits or expose research data when public.
+_PROTECTED_PREFIXES = (
+    "/api/documents",
+    "/api/quiz",
+    "/api/exam",
+    "/api/answer-from-notes",
+    "/api/evaluation",
+)
+
+
+def require_access_pin(request: Request) -> None:
+    """Gate expensive / sensitive APIs when STUDYQUIZ_ACCESS_PIN is set."""
+    if not security.auth_required():
+        return
+    # Allow unauthenticated quiz submit by id (low cost) — only generation is gated.
+    path = request.url.path.rstrip("/")
+    if path.startswith("/api/quiz/") and path.endswith("/submit") and request.method == "POST":
+        return
+    # GET individual exam by id is fine once generated
+    if (
+        request.method == "GET"
+        and path.startswith("/api/exam/")
+        and not path.endswith("/answers")
+    ):
+        return
+    pin = security.extract_pin_from_request_headers(request.headers)
+    if not security.pin_matches(pin):
+        raise HTTPException(
+            401,
+            "Access PIN required. Set header X-StudyQuiz-Pin (or Authorization: Bearer <pin>) "
+            "to match STUDYQUIZ_ACCESS_PIN on the deployment.",
+        )
+
+
+@app.middleware("http")
+async def access_pin_middleware(request: Request, call_next):
+    path = request.url.path
+    # CORS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES):
+        try:
+            require_access_pin(request)
+        except HTTPException as e:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -90,6 +140,7 @@ def health():
         "detail": detail,
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+        "auth_required": security.auth_required(),
         "upload_hint": (
             "Use Vercel Blob client upload for files over ~4 MB on Vercel."
             if store._running_serverless()
@@ -181,44 +232,65 @@ def _filename_from_url(url: str, fallback: str = "upload.bin") -> str:
 
 
 def _download_url_to_bytes(url: str) -> bytes:
-    """Download a remote file (e.g. Vercel Blob) with a size ceiling.
+    """Download a remote file (Vercel Blob only) with SSRF allowlist + size ceiling.
 
-    Private Blob stores need the read-write token on the request.
+    Only https hosts under the Blob allowlist are fetched. Redirects are followed
+    manually and re-checked against the same allowlist.
     """
+    try:
+        url = security.validate_download_url(url)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
     max_bytes = MAX_UPLOAD_BYTES
     headers: dict[str, str] = {}
     blob_token = os.getenv("BLOB_READ_WRITE_TOKEN") or ""
-    if blob_token and (
-        "blob.vercel-storage.com" in url
-        or "vercel-storage.com" in url
-        or "public.blob.vercel-storage.com" in url
-    ):
+    if blob_token and security.is_blob_url_for_auth_header(url):
         headers["Authorization"] = f"Bearer {blob_token}"
 
+    current = url
     try:
-        with httpx.Client(follow_redirects=True, timeout=180.0, headers=headers) as client:
-            with client.stream("GET", url) as resp:
-                if resp.status_code >= 400:
-                    raise HTTPException(
-                        400,
-                        f"Could not download uploaded file (HTTP {resp.status_code}). "
-                        "If the Blob store is Private, ensure BLOB_READ_WRITE_TOKEN is set.",
-                    )
-                cl = resp.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > max_bytes:
-                    raise HTTPException(
-                        413,
-                        f"File too large (max {max_bytes // (1024 * 1024)} MB).",
-                    )
-                buf = bytearray()
-                for chunk in resp.iter_bytes(1024 * 256):
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
+        with httpx.Client(follow_redirects=False, timeout=180.0, headers=headers) as client:
+            for _ in range(5):
+                with client.stream("GET", current) as resp:
+                    # Manual redirect follow with allowlist re-check (SSRF).
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            raise HTTPException(400, "Redirect without Location header.")
+                        # Resolve relative redirects against current URL.
+                        next_url = str(httpx.URL(current).join(loc))
+                        try:
+                            current = security.validate_download_url(next_url)
+                        except ValueError as e:
+                            raise HTTPException(
+                                400,
+                                f"Redirect target blocked: {e}",
+                            ) from e
+                        continue
+
+                    if resp.status_code >= 400:
+                        raise HTTPException(
+                            400,
+                            f"Could not download uploaded file (HTTP {resp.status_code}). "
+                            "If the Blob store is Private, ensure BLOB_READ_WRITE_TOKEN is set.",
+                        )
+                    cl = resp.headers.get("content-length")
+                    if cl and cl.isdigit() and int(cl) > max_bytes:
                         raise HTTPException(
                             413,
                             f"File too large (max {max_bytes // (1024 * 1024)} MB).",
                         )
-                return bytes(buf)
+                    buf = bytearray()
+                    for chunk in resp.iter_bytes(1024 * 256):
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            raise HTTPException(
+                                413,
+                                f"File too large (max {max_bytes // (1024 * 1024)} MB).",
+                            )
+                    return bytes(buf)
+            raise HTTPException(400, "Too many redirects while downloading file.")
     except HTTPException:
         raise
     except Exception as e:

@@ -105,8 +105,17 @@ the file never goes through the Python function body.
 >
 > Schema is created automatically on first request (same tables as local SQLite).
 > Local `uvicorn` keeps using `data/studyquiz.db` unless Turso env vars are set.
+>
+> **Access PIN (recommended on public deploys):** set `STUDYQUIZ_ACCESS_PIN` so
+> upload, generate, and evaluation routes require header `X-StudyQuiz-Pin`
+> (the UI prompts once per session). Leave unset for open local demos.
+>
+> **Blob URL allowlist:** remote ingest only accepts Vercel Blob hosts
+> (`*.public.blob.vercel-storage.com`, `*.blob.vercel-storage.com`). Extra hosts
+> via `BLOB_ALLOWED_HOSTS` (comma-separated).
+>
 > Health check: `GET /api/health` reports `storage_backend`, `storage_durable`,
-> `blob_configured`, and `max_upload_mb`.
+> `blob_configured`, `auth_required`, and `max_upload_mb`.
 
 ## Evaluation mode (for the project write-up)
 
