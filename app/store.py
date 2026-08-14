@@ -499,10 +499,64 @@ CREATE TABLE IF NOT EXISTS exam_papers (
     FOREIGN KEY (document_id) REFERENCES documents(id)
 );
 
+CREATE TABLE IF NOT EXISTS srs_cards (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    card_type TEXT NOT NULL DEFAULT 'mcq',
+    payload_json TEXT NOT NULL,
+    ease REAL NOT NULL DEFAULT 2.5,
+    interval_days REAL NOT NULL DEFAULT 0,
+    due_at TEXT NOT NULL,
+    reps INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    UNIQUE(document_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS exam_attempts (
+    id TEXT PRIMARY KEY,
+    exam_id TEXT NOT NULL,
+    answers_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (exam_id) REFERENCES exam_papers(id)
+);
+
+CREATE TABLE IF NOT EXISTS question_banks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    document_id TEXT,
+    questions_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mixed_papers (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    title TEXT,
+    config_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS share_tokens (
+    token TEXT PRIMARY KEY,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    password_hash TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_quizzes_doc ON quizzes(document_id);
 CREATE INDEX IF NOT EXISTS idx_eval_quiz ON eval_rows(quiz_id);
 CREATE INDEX IF NOT EXISTS idx_eval_phase ON eval_rows(phase);
 CREATE INDEX IF NOT EXISTS idx_exam_doc ON exam_papers(document_id);
+CREATE INDEX IF NOT EXISTS idx_srs_doc_due ON srs_cards(document_id, due_at);
+CREATE INDEX IF NOT EXISTS idx_exam_attempts_exam ON exam_attempts(exam_id);
+CREATE INDEX IF NOT EXISTS idx_banks_created ON question_banks(created_at);
+CREATE INDEX IF NOT EXISTS idx_mixed_doc ON mixed_papers(document_id);
 """
 
 
@@ -666,8 +720,19 @@ def delete_document(doc_id: str) -> bool:
             conn.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", (qid,))
 
         conn.execute("DELETE FROM quizzes WHERE document_id = ?", (doc_id,))
+        # Exam attempts for papers on this document
+        exam_rows = conn.execute(
+            "SELECT id FROM exam_papers WHERE document_id = ?",
+            (doc_id,),
+        ).fetchall()
+        for er in exam_rows:
+            conn.execute(
+                "DELETE FROM exam_attempts WHERE exam_id = ?", (er["id"],)
+            )
         conn.execute("DELETE FROM exam_papers WHERE document_id = ?", (doc_id,))
         conn.execute("DELETE FROM eval_rows WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM srs_cards WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM mixed_papers WHERE document_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     return True
 
@@ -942,3 +1007,562 @@ def _eval_row_to_dict(row: Any) -> dict:
         "options_unique": bool(row["options_unique"]),
         "expected_grounded": bool(row["expected_grounded"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Attempt reads (study loop)
+# ---------------------------------------------------------------------------
+
+
+def list_attempts(
+    *,
+    quiz_id: str | None = None,
+    document_id: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 50), 200))
+    with connection() as conn:
+        if quiz_id:
+            rows = conn.execute(
+                """
+                SELECT a.*, q.document_id, q.topic
+                FROM quiz_attempts a
+                JOIN quizzes q ON q.id = a.quiz_id
+                WHERE a.quiz_id = ?
+                ORDER BY a.submitted_at DESC
+                LIMIT ?
+                """,
+                (quiz_id, limit),
+            ).fetchall()
+        elif document_id:
+            rows = conn.execute(
+                """
+                SELECT a.*, q.document_id, q.topic
+                FROM quiz_attempts a
+                JOIN quizzes q ON q.id = a.quiz_id
+                WHERE q.document_id = ?
+                ORDER BY a.submitted_at DESC
+                LIMIT ?
+                """,
+                (document_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT a.*, q.document_id, q.topic
+                FROM quiz_attempts a
+                JOIN quizzes q ON q.id = a.quiz_id
+                ORDER BY a.submitted_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    out = []
+    for row in rows:
+        out.append(
+            {
+                "id": row["id"],
+                "quiz_id": row["quiz_id"],
+                "document_id": row["document_id"],
+                "topic": row["topic"],
+                "answers": _loads(row["answers_json"]),
+                "score": row["score"],
+                "total": row["total"],
+                "results": _loads(row["results_json"]),
+                "submitted_at": row["submitted_at"],
+            }
+        )
+    return out
+
+
+def list_wrong_items(document_id: str, *, limit: int = 40) -> list[dict]:
+    """Wrong MCQ items from recent attempts on this document (newest first, deduped)."""
+    attempts = list_attempts(document_id=document_id, limit=30)
+    seen: set[str] = set()
+    items: list[dict] = []
+    for att in attempts:
+        quiz = get_quiz(att["quiz_id"])
+        if quiz is None:
+            continue
+        questions = quiz["questions"]
+        for i, r in enumerate(att.get("results") or []):
+            if r.get("correct"):
+                continue
+            if i >= len(questions):
+                continue
+            q = questions[i]
+            stem = q.question if hasattr(q, "question") else q.get("question", "")
+            key = stem.casefold().strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            payload = {
+                "question": q.question if hasattr(q, "question") else q["question"],
+                "options": list(q.options if hasattr(q, "options") else q["options"]),
+                "correct_index": (
+                    q.correct_index if hasattr(q, "correct_index") else q["correct_index"]
+                ),
+                "explanation": (
+                    q.explanation if hasattr(q, "explanation") else q.get("explanation", "")
+                ),
+                "source_quote": (
+                    q.source_quote if hasattr(q, "source_quote") else q.get("source_quote", "")
+                ),
+            }
+            items.append(
+                {
+                    "quiz_id": att["quiz_id"],
+                    "question_index": i,
+                    "payload": payload,
+                    "attempt_id": att["id"],
+                }
+            )
+            if len(items) >= limit:
+                return items
+    return items
+
+
+# ---------------------------------------------------------------------------
+# SRS / flashcards
+# ---------------------------------------------------------------------------
+
+
+def _srs_row_to_dict(row: Any) -> dict:
+    return {
+        "id": row["id"],
+        "document_id": row["document_id"],
+        "fingerprint": row["fingerprint"],
+        "card_type": row["card_type"],
+        "payload": _loads(row["payload_json"]),
+        "ease": float(row["ease"]),
+        "interval_days": float(row["interval_days"]),
+        "due_at": row["due_at"],
+        "reps": int(row["reps"]),
+        "lapses": int(row["lapses"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def upsert_srs_card(
+    *,
+    card_id: str,
+    document_id: str,
+    fingerprint: str,
+    card_type: str,
+    payload: dict,
+    ease: float = 2.5,
+    interval_days: float = 0.0,
+    due_at: str,
+    reps: int = 0,
+    lapses: int = 0,
+) -> None:
+    now = _now()
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM srs_cards WHERE document_id = ? AND fingerprint = ?",
+            (document_id, fingerprint),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE srs_cards SET
+                    payload_json = ?, ease = ?, interval_days = ?, due_at = ?,
+                    reps = ?, lapses = ?, updated_at = ?, card_type = ?
+                WHERE id = ?
+                """,
+                (
+                    _dumps(payload),
+                    ease,
+                    interval_days,
+                    due_at,
+                    reps,
+                    lapses,
+                    now,
+                    card_type or "mcq",
+                    existing["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO srs_cards (
+                    id, document_id, fingerprint, card_type, payload_json,
+                    ease, interval_days, due_at, reps, lapses, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    card_id,
+                    document_id,
+                    fingerprint,
+                    card_type or "mcq",
+                    _dumps(payload),
+                    ease,
+                    interval_days,
+                    due_at,
+                    reps,
+                    lapses,
+                    now,
+                ),
+            )
+
+
+def get_srs_card(card_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM srs_cards WHERE id = ?", (card_id,)
+        ).fetchone()
+    return _srs_row_to_dict(row) if row else None
+
+
+def get_srs_card_by_fingerprint(document_id: str, fingerprint: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM srs_cards WHERE document_id = ? AND fingerprint = ?",
+            (document_id, fingerprint),
+        ).fetchone()
+    return _srs_row_to_dict(row) if row else None
+
+
+def list_due_srs_cards(
+    document_id: str,
+    *,
+    limit: int = 20,
+    card_type: str | None = None,
+    now_iso: str | None = None,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 20), 50))
+    now = now_iso or _now()
+    with connection() as conn:
+        if card_type:
+            rows = conn.execute(
+                """
+                SELECT * FROM srs_cards
+                WHERE document_id = ? AND due_at <= ? AND card_type = ?
+                ORDER BY due_at ASC
+                LIMIT ?
+                """,
+                (document_id, now, card_type, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM srs_cards
+                WHERE document_id = ? AND due_at <= ?
+                ORDER BY due_at ASC
+                LIMIT ?
+                """,
+                (document_id, now, limit),
+            ).fetchall()
+    return [_srs_row_to_dict(r) for r in rows]
+
+
+def count_due_srs_cards(document_id: str, *, now_iso: str | None = None) -> int:
+    now = now_iso or _now()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM srs_cards WHERE document_id = ? AND due_at <= ?",
+            (document_id, now),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def update_srs_card_schedule(
+    card_id: str,
+    *,
+    ease: float,
+    interval_days: float,
+    due_at: str,
+    reps: int,
+    lapses: int,
+) -> bool:
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM srs_cards WHERE id = ?", (card_id,)
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            """
+            UPDATE srs_cards SET
+                ease = ?, interval_days = ?, due_at = ?,
+                reps = ?, lapses = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (ease, interval_days, due_at, reps, lapses, _now(), card_id),
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Exam writing attempts
+# ---------------------------------------------------------------------------
+
+
+def save_exam_attempt(
+    *,
+    attempt_id: str,
+    exam_id: str,
+    answers: dict,
+    status: str = "draft",
+) -> None:
+    now = _now()
+    # Cap each answer length
+    clean: dict[str, str] = {}
+    for k, v in (answers or {}).items():
+        s = str(v or "")
+        if len(s) > 8000:
+            s = s[:8000]
+        clean[str(k)] = s
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM exam_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE exam_attempts
+                SET answers_json = ?, status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_dumps(clean), status, now, attempt_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO exam_attempts (
+                    id, exam_id, answers_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (attempt_id, exam_id, _dumps(clean), status, now, now),
+            )
+
+
+def get_exam_attempt(attempt_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM exam_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "exam_id": row["exam_id"],
+        "answers": _loads(row["answers_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_latest_exam_draft(exam_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM exam_attempts
+            WHERE exam_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (exam_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return get_exam_attempt(row["id"])
+
+
+def list_exam_attempts(exam_id: str) -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, exam_id, status, created_at, updated_at
+            FROM exam_attempts WHERE exam_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (exam_id,),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "exam_id": r["exam_id"],
+            "status": r["status"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Question banks (past papers)
+# ---------------------------------------------------------------------------
+
+
+def save_question_bank(
+    *,
+    bank_id: str,
+    title: str,
+    questions: list[str],
+    document_id: str | None = None,
+) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO question_banks (id, title, document_id, questions_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                bank_id,
+                title or "Past paper",
+                document_id,
+                _dumps(list(questions)),
+                _now(),
+            ),
+        )
+
+
+def list_question_banks() -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, document_id, questions_json, created_at
+            FROM question_banks ORDER BY created_at DESC
+            """
+        ).fetchall()
+    out = []
+    for r in rows:
+        qs = _loads(r["questions_json"])
+        out.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "document_id": r["document_id"],
+                "question_count": len(qs) if isinstance(qs, list) else 0,
+                "created_at": r["created_at"],
+            }
+        )
+    return out
+
+
+def get_question_bank(bank_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM question_banks WHERE id = ?", (bank_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "document_id": row["document_id"],
+        "questions": _loads(row["questions_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def delete_question_bank(bank_id: str) -> bool:
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM question_banks WHERE id = ?", (bank_id,)
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute("DELETE FROM question_banks WHERE id = ?", (bank_id,))
+    return True
+
+
+def rename_question_bank(bank_id: str, title: str) -> bool:
+    title = (title or "").strip() or "Past paper"
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM question_banks WHERE id = ?", (bank_id,)
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            "UPDATE question_banks SET title = ? WHERE id = ?",
+            (title, bank_id),
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Mixed papers
+# ---------------------------------------------------------------------------
+
+
+def save_mixed_paper(
+    *,
+    mixed_id: str,
+    document_id: str,
+    title: str | None,
+    config: dict,
+) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO mixed_papers (id, document_id, title, config_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                mixed_id,
+                document_id,
+                title or "Mixed paper",
+                _dumps(config),
+                _now(),
+            ),
+        )
+
+
+def get_mixed_paper(mixed_id: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM mixed_papers WHERE id = ?", (mixed_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "document_id": row["document_id"],
+        "title": row["title"],
+        "config": _loads(row["config_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Share tokens
+# ---------------------------------------------------------------------------
+
+
+def save_share_token(
+    *,
+    token: str,
+    resource_type: str,
+    resource_id: str,
+    password_hash: str | None = None,
+) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO share_tokens (token, resource_type, resource_id, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (token, resource_type, resource_id, password_hash, _now()),
+        )
+
+
+def get_share_token(token: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM share_tokens WHERE token = ?", (token,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "token": row["token"],
+        "resource_type": row["resource_type"],
+        "resource_id": row["resource_id"],
+        "password_hash": row["password_hash"],
+        "created_at": row["created_at"],
+    }
+

@@ -58,6 +58,11 @@ _PROTECTED_PREFIXES = (
     "/api/exam",
     "/api/answer-from-notes",
     "/api/evaluation",
+    "/api/study",
+    "/api/flashcards",
+    "/api/banks",
+    "/api/mixed",
+    "/api/share",
 )
 
 
@@ -65,17 +70,31 @@ def require_access_pin(request: Request) -> None:
     """Gate expensive / sensitive APIs when STUDYQUIZ_ACCESS_PIN is set."""
     if not security.auth_required():
         return
-    # Allow unauthenticated quiz submit by id (low cost) — only generation is gated.
     path = request.url.path.rstrip("/")
-    if path.startswith("/api/quiz/") and path.endswith("/submit") and request.method == "POST":
+    method = request.method.upper()
+
+    # Take / grade / load shared resources without PIN (hard-to-guess ids).
+    if method == "POST" and path.startswith("/api/quiz/") and path.endswith("/submit"):
         return
-    # GET individual exam by id is fine once generated
-    if (
-        request.method == "GET"
-        and path.startswith("/api/exam/")
-        and not path.endswith("/answers")
-    ):
+    if method == "GET" and path.startswith("/api/quiz/") and "/evaluation" not in path:
         return
+    if method == "GET" and path.startswith("/api/exam/"):
+        # Allow GET paper and draft load; block GET that doesn't exist for answers
+        if path.endswith("/answers"):
+            pass  # still require pin for generating guides
+        else:
+            return
+    if method == "PUT" and "/draft" in path and path.startswith("/api/exam/"):
+        return
+    if method == "POST" and path.startswith("/api/exam/") and path.endswith("/submit-writing"):
+        return
+    if method == "GET" and path.startswith("/api/mixed/"):
+        return
+    if method == "GET" and path.startswith("/api/share/"):
+        return
+    if method == "POST" and path.startswith("/api/study/review"):
+        return
+
     pin = security.extract_pin_from_request_headers(request.headers)
     if not security.pin_matches(pin):
         raise HTTPException(
@@ -705,11 +724,63 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
         results=results,
     )
 
+    # Feed spaced-repetition bank (wrong → due now; known cards step on correct)
+    srs_updated = 0
+    try:
+        from . import study as study_mod
+
+        doc_id = quiz.get("doc_id")
+        if doc_id:
+            for i, (q, r) in enumerate(zip(questions, results)):
+                fp = study_mod.fingerprint_question(q.question)
+                payload = {
+                    "question": q.question,
+                    "options": list(q.options),
+                    "correct_index": q.correct_index,
+                    "explanation": q.explanation or "",
+                    "source_quote": q.source_quote or "",
+                }
+                existing = store.get_srs_card_by_fingerprint(doc_id, fp)
+                if not r.get("correct"):
+                    store.upsert_srs_card(
+                        card_id=(existing["id"] if existing else uuid.uuid4().hex[:12]),
+                        document_id=doc_id,
+                        fingerprint=fp,
+                        card_type="mcq",
+                        payload=payload,
+                        ease=existing["ease"] if existing else 2.5,
+                        interval_days=0,
+                        due_at=study_mod.utc_now().isoformat(),
+                        reps=0,
+                        lapses=(existing["lapses"] + 1) if existing else 1,
+                    )
+                    srs_updated += 1
+                elif existing:
+                    sched = study_mod.sm2_schedule(
+                        grade="good",
+                        ease=existing["ease"],
+                        interval_days=existing["interval_days"],
+                        reps=existing["reps"],
+                        lapses=existing["lapses"],
+                    )
+                    store.update_srs_card_schedule(
+                        existing["id"],
+                        ease=sched["ease"],
+                        interval_days=sched["interval_days"],
+                        due_at=sched["due_at"],
+                        reps=sched["reps"],
+                        lapses=sched["lapses"],
+                    )
+                    srs_updated += 1
+    except Exception:
+        srs_updated = 0
+
     return {
         "score": score,
         "total": len(questions),
         "results": results,
         "grounding": quiz.get("served_metrics"),
+        "srs_updated": srs_updated,
     }
 
 
@@ -1058,6 +1129,7 @@ async def answer_from_notes_endpoint(request: Request):
     pre_parsed: list[str] = []
     is_json = "application/json" in content_type
 
+    bank_id = ""
     if is_json:
         try:
             body = await request.json()
@@ -1065,6 +1137,7 @@ async def answer_from_notes_endpoint(request: Request):
             raise HTTPException(400, "Invalid JSON body.")
         document_id = str(body.get("document_id") or "").strip()
         questions_text = str(body.get("questions_text") or body.get("text") or "")
+        bank_id = str(body.get("bank_id") or "").strip()
         raw_list = body.get("questions")
         if isinstance(raw_list, list):
             pre_parsed = [str(q).strip() for q in raw_list if str(q).strip()]
@@ -1079,6 +1152,11 @@ async def answer_from_notes_endpoint(request: Request):
                 str(body.get("questions_filename") or body.get("filename") or "").strip()
                 or _filename_from_url(file_url, "questions.pdf")
             )
+        if bank_id and not pre_parsed:
+            bank = store.get_question_bank(bank_id)
+            if bank is None:
+                raise HTTPException(404, "Past paper bank not found.")
+            pre_parsed = list(bank.get("questions") or [])
     else:
         form = await request.form()
         document_id = str(form.get("document_id") or "").strip()
@@ -1167,3 +1245,673 @@ async def answer_from_notes_endpoint(request: Request):
         "answers": answer_dicts,
         "grounding": g_summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Study loop — safe quiz load, SRS, banks, mixed, share
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/quiz/{quiz_id}")
+def get_quiz_client(quiz_id: str):
+    """Client-safe quiz payload (no answers). Used for re-take and share links."""
+    quiz = store.get_quiz(quiz_id)
+    if quiz is None:
+        raise HTTPException(404, "Quiz not found.")
+    return {
+        "quiz_id": quiz_id,
+        "document_id": quiz.get("doc_id"),
+        "use_rag": quiz.get("use_rag"),
+        "topic": quiz.get("topic"),
+        "difficulty": quiz.get("difficulty") if "difficulty" in quiz else None,
+        "questions": [
+            {"index": i, "question": q.question, "options": list(q.options)}
+            for i, q in enumerate(quiz["questions"])
+        ],
+        "created_at": quiz.get("created_at"),
+    }
+
+
+@app.get("/api/study/due")
+def study_due(document_id: str, limit: int = 10, card_type: str | None = None):
+    if not document_id:
+        raise HTTPException(400, "document_id is required.")
+    if store.get_document(document_id) is None:
+        raise HTTPException(404, "Document not found.")
+    cards = store.list_due_srs_cards(
+        document_id, limit=limit, card_type=card_type or None
+    )
+    # Client-safe for practice: include payload needed to show front; answers
+    # only for flashcard flip (qa) — MCQ practice uses separate quiz path.
+    safe = []
+    for c in cards:
+        p = dict(c.get("payload") or {})
+        safe.append(
+            {
+                "id": c["id"],
+                "card_type": c["card_type"],
+                "due_at": c["due_at"],
+                "front": p.get("question") or p.get("front") or "",
+                "options": p.get("options"),
+                # back only for non-mcq reveal; mcq graded server-side via review grade
+                "back": p.get("back")
+                or p.get("explanation")
+                or (
+                    (p.get("options") or [None])[p.get("correct_index", 0)]
+                    if p.get("options")
+                    else ""
+                ),
+                "reps": c["reps"],
+            }
+        )
+    return {
+        "document_id": document_id,
+        "due_count": store.count_due_srs_cards(document_id),
+        "cards": safe,
+    }
+
+
+@app.get("/api/study/wrong")
+def study_wrong(document_id: str, limit: int = 20):
+    if store.get_document(document_id) is None:
+        raise HTTPException(404, "Document not found.")
+    items = store.list_wrong_items(document_id, limit=limit)
+    # Strip correct answers for list preview; full payload used when building quiz
+    return {
+        "document_id": document_id,
+        "items": [
+            {
+                "question": it["payload"]["question"],
+                "quiz_id": it["quiz_id"],
+                "question_index": it["question_index"],
+            }
+            for it in items
+        ],
+        "count": len(items),
+    }
+
+
+class ReviewRequest(BaseModel):
+    card_id: str
+    grade: str = "good"  # again | hard | good | easy
+    # Optional MCQ self-check: chosen option index (server can mark again/good)
+    chosen_index: int | None = None
+
+
+@app.post("/api/study/review")
+def study_review(req: ReviewRequest):
+    from . import study as study_mod
+
+    card = store.get_srs_card(req.card_id)
+    if card is None:
+        raise HTTPException(404, "Card not found.")
+    grade = (req.grade or "good").lower()
+    payload = card.get("payload") or {}
+    correct = None
+    if req.chosen_index is not None and "correct_index" in payload:
+        correct = int(req.chosen_index) == int(payload["correct_index"])
+        grade = "good" if correct else "again"
+    sched = study_mod.sm2_schedule(
+        grade=grade,
+        ease=card["ease"],
+        interval_days=card["interval_days"],
+        reps=card["reps"],
+        lapses=card["lapses"],
+    )
+    store.update_srs_card_schedule(
+        req.card_id,
+        ease=sched["ease"],
+        interval_days=sched["interval_days"],
+        due_at=sched["due_at"],
+        reps=sched["reps"],
+        lapses=sched["lapses"],
+    )
+    return {
+        "card_id": req.card_id,
+        "grade": grade,
+        "correct": correct,
+        "schedule": sched,
+        "explanation": payload.get("explanation") or "",
+        "source_quote": payload.get("source_quote") or "",
+        "correct_index": payload.get("correct_index"),
+        "options": payload.get("options"),
+    }
+
+
+class QuizFromWrongRequest(BaseModel):
+    document_id: str
+    limit: int = 8
+
+
+@app.post("/api/study/quiz-from-wrong")
+def quiz_from_wrong(req: QuizFromWrongRequest):
+    """Build a real stored quiz from weak/due SRS MCQ cards (no Claude)."""
+    doc = store.get_document(req.document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found.")
+    limit = max(1, min(req.limit, 15))
+    cards = store.list_due_srs_cards(req.document_id, limit=limit, card_type="mcq")
+    if len(cards) < 1:
+        # Fall back to wrong items not yet in SRS
+        wrong = store.list_wrong_items(req.document_id, limit=limit)
+        questions = []
+        groundings = []
+        for it in wrong:
+            p = it["payload"]
+            questions.append(
+                generator.QuizQuestion(
+                    question=p["question"],
+                    options=list(p["options"]),
+                    correct_index=int(p["correct_index"]),
+                    explanation=p.get("explanation") or "",
+                    source_quote=p.get("source_quote") or "",
+                )
+            )
+            groundings.append(
+                grounding.QuestionGrounding(
+                    grounded=False,
+                    match_type="weak_bank",
+                    source_quote=p.get("source_quote") or "",
+                    options_unique=True,
+                    expected_grounded=False,
+                )
+            )
+    else:
+        questions = []
+        groundings = []
+        for c in cards:
+            p = c.get("payload") or {}
+            opts = list(p.get("options") or [])
+            if len(opts) != 4 or "correct_index" not in p:
+                continue
+            questions.append(
+                generator.QuizQuestion(
+                    question=p.get("question") or "",
+                    options=opts,
+                    correct_index=int(p["correct_index"]),
+                    explanation=p.get("explanation") or "",
+                    source_quote=p.get("source_quote") or "",
+                )
+            )
+            groundings.append(
+                grounding.QuestionGrounding(
+                    grounded=False,
+                    match_type="srs_card",
+                    source_quote=p.get("source_quote") or "",
+                    options_unique=True,
+                    expected_grounded=False,
+                )
+            )
+    if not questions:
+        raise HTTPException(
+            400,
+            "No weak questions yet. Take a quiz first and miss some items.",
+        )
+    quiz_id = uuid.uuid4().hex[:12]
+    empty_metrics = {
+        "use_rag": False,
+        "total_questions": len(questions),
+        "grounded_count": 0,
+        "ungrounded_count": len(questions),
+        "quote_in_source_rate": 0.0,
+        "options_unique_rate": 1.0,
+        "match_type_counts": {},
+        "empty_quote_rate": 0.0,
+    }
+    store.save_quiz(
+        quiz_id=quiz_id,
+        document_id=req.document_id,
+        use_rag=False,
+        topic="weak areas",
+        questions=questions,
+        groundings=groundings,
+        pre_filter_metrics=empty_metrics,
+        served_metrics=empty_metrics,
+        context_chunks=[],
+    )
+    return {
+        "quiz_id": quiz_id,
+        "source": "weak_bank",
+        "use_rag": False,
+        "difficulty": "medium",
+        "questions": [
+            {"index": i, "question": q.question, "options": q.options}
+            for i, q in enumerate(questions)
+        ],
+        "retrieval": {"strategy": "weak_bank", "num_batches": 0},
+        "grounding": {
+            "require_grounding": False,
+            "filtered_out": 0,
+            "best_effort": False,
+            "warning": None,
+        },
+    }
+
+
+class FlashFromQuizRequest(BaseModel):
+    quiz_id: str
+
+
+@app.post("/api/flashcards/from-quiz")
+def flashcards_from_quiz(req: FlashFromQuizRequest):
+    quiz = store.get_quiz(req.quiz_id)
+    if quiz is None:
+        raise HTTPException(404, "Quiz not found.")
+    doc_id = quiz.get("doc_id")
+    if not doc_id:
+        raise HTTPException(400, "Quiz has no document.")
+    from . import study as study_mod
+
+    n = 0
+    for q in quiz["questions"]:
+        fp = study_mod.fingerprint_question(q.question)
+        back = q.options[q.correct_index] if q.options else ""
+        if q.explanation:
+            back = f"{back}\n\n{q.explanation}".strip()
+        payload = {
+            "question": q.question,
+            "front": q.question,
+            "back": back,
+            "options": list(q.options),
+            "correct_index": q.correct_index,
+            "explanation": q.explanation or "",
+            "source_quote": q.source_quote or "",
+        }
+        existing = store.get_srs_card_by_fingerprint(doc_id, fp)
+        store.upsert_srs_card(
+            card_id=(existing["id"] if existing else uuid.uuid4().hex[:12]),
+            document_id=doc_id,
+            fingerprint=fp,
+            card_type="qa",
+            payload=payload,
+            ease=existing["ease"] if existing else 2.5,
+            interval_days=0 if not existing else existing["interval_days"],
+            due_at=study_mod.utc_now().isoformat()
+            if not existing
+            else existing["due_at"],
+            reps=existing["reps"] if existing else 0,
+            lapses=existing["lapses"] if existing else 0,
+        )
+        n += 1
+    return {"document_id": doc_id, "cards_added": n, "due_count": store.count_due_srs_cards(doc_id)}
+
+
+class FlashFromMineRequest(BaseModel):
+    document_id: str
+    answers: list[dict]
+
+
+@app.post("/api/flashcards/from-mine")
+def flashcards_from_mine(req: FlashFromMineRequest):
+    if store.get_document(req.document_id) is None:
+        raise HTTPException(404, "Document not found.")
+    from . import study as study_mod
+
+    n = 0
+    for a in req.answers or []:
+        if a.get("error"):
+            continue
+        q = str(a.get("question") or "").strip()
+        if not q:
+            continue
+        outline = a.get("outline") or []
+        full = (a.get("full_answer") or "").strip()
+        back = "\n".join(f"• {x}" for x in outline) if outline else full[:800]
+        fp = study_mod.fingerprint_question(q)
+        payload = {
+            "question": q,
+            "front": q,
+            "back": back or "(no answer)",
+            "source_quotes": a.get("source_quotes") or [],
+        }
+        existing = store.get_srs_card_by_fingerprint(req.document_id, fp)
+        store.upsert_srs_card(
+            card_id=(existing["id"] if existing else uuid.uuid4().hex[:12]),
+            document_id=req.document_id,
+            fingerprint=fp,
+            card_type="qa",
+            payload=payload,
+            ease=2.5,
+            interval_days=0,
+            due_at=study_mod.utc_now().isoformat(),
+            reps=0,
+            lapses=0,
+        )
+        n += 1
+    return {
+        "document_id": req.document_id,
+        "cards_added": n,
+        "due_count": store.count_due_srs_cards(req.document_id),
+    }
+
+
+# --- Exam writing ---
+
+
+class ExamDraftRequest(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+    attempt_id: str | None = None
+
+
+@app.put("/api/exam/{exam_id}/draft")
+def save_exam_draft(exam_id: str, req: ExamDraftRequest):
+    if store.get_exam_paper(exam_id) is None:
+        raise HTTPException(404, "Exam paper not found.")
+    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex[:12]
+    store.save_exam_attempt(
+        attempt_id=attempt_id,
+        exam_id=exam_id,
+        answers=req.answers or {},
+        status="draft",
+    )
+    return {"attempt_id": attempt_id, "status": "draft", "exam_id": exam_id}
+
+
+@app.post("/api/exam/{exam_id}/submit-writing")
+def submit_exam_writing(exam_id: str, req: ExamDraftRequest):
+    if store.get_exam_paper(exam_id) is None:
+        raise HTTPException(404, "Exam paper not found.")
+    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex[:12]
+    store.save_exam_attempt(
+        attempt_id=attempt_id,
+        exam_id=exam_id,
+        answers=req.answers or {},
+        status="submitted",
+    )
+    return {
+        "attempt_id": attempt_id,
+        "status": "submitted",
+        "exam_id": exam_id,
+        "message": "Answers saved. Generate marking guides to self-check side by side.",
+    }
+
+
+@app.get("/api/exam/{exam_id}/draft")
+def get_exam_draft(exam_id: str):
+    if store.get_exam_paper(exam_id) is None:
+        raise HTTPException(404, "Exam paper not found.")
+    draft = store.get_latest_exam_draft(exam_id)
+    if draft is None:
+        return {"exam_id": exam_id, "attempt_id": None, "answers": {}, "status": None}
+    return draft
+
+
+# --- Question banks ---
+
+
+class BankCreate(BaseModel):
+    title: str | None = None
+    questions: list[str] | None = None
+    questions_text: str | None = None
+    document_id: str | None = None
+
+
+@app.post("/api/banks")
+def create_bank(req: BankCreate):
+    qs: list[str] = []
+    if req.questions:
+        qs = [str(q).strip() for q in req.questions if str(q).strip()]
+    elif req.questions_text:
+        qs = answer_from_notes.parse_questions(req.questions_text)
+    if not qs:
+        raise HTTPException(400, "No questions to save.")
+    bank_id = uuid.uuid4().hex[:12]
+    title = (req.title or "").strip() or f"Past paper ({len(qs)} Qs)"
+    store.save_question_bank(
+        bank_id=bank_id,
+        title=title,
+        questions=qs,
+        document_id=req.document_id,
+    )
+    return {
+        "id": bank_id,
+        "title": title,
+        "question_count": len(qs),
+    }
+
+
+@app.get("/api/banks")
+def list_banks():
+    return store.list_question_banks()
+
+
+@app.get("/api/banks/{bank_id}")
+def get_bank(bank_id: str):
+    row = store.get_question_bank(bank_id)
+    if row is None:
+        raise HTTPException(404, "Bank not found.")
+    return row
+
+
+@app.delete("/api/banks/{bank_id}")
+def delete_bank(bank_id: str):
+    if not store.delete_question_bank(bank_id):
+        raise HTTPException(404, "Bank not found.")
+    return {"ok": True, "id": bank_id}
+
+
+class BankRename(BaseModel):
+    title: str
+
+
+@app.patch("/api/banks/{bank_id}")
+def rename_bank(bank_id: str, body: BankRename):
+    if not store.rename_question_bank(bank_id, body.title):
+        raise HTTPException(404, "Bank not found.")
+    return {"id": bank_id, "title": body.title.strip()}
+
+
+# --- Mixed paper ---
+
+
+class MixedRequest(BaseModel):
+    document_id: str
+    title: str | None = None
+    num_mcq: int = 5
+    num_exam_questions: int = 2
+    topic: str | None = None
+    difficulty: str = "medium"
+    use_rag: bool = True
+    require_grounding: bool = True
+    course_code: str | None = None
+    course_title: str | None = None
+    # Or attach existing:
+    quiz_id: str | None = None
+    exam_id: str | None = None
+
+
+@app.post("/api/mixed")
+def create_mixed(req: MixedRequest):
+    doc = store.get_document(req.document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found.")
+
+    quiz_id = (req.quiz_id or "").strip() or None
+    exam_id = (req.exam_id or "").strip() or None
+
+    # Generate MCQ section if needed
+    if not quiz_id:
+        qr = QuizRequest(
+            document_id=req.document_id,
+            num_questions=max(1, min(req.num_mcq, 10)),
+            topic=req.topic,
+            use_rag=req.use_rag,
+            require_grounding=req.require_grounding,
+            difficulty=req.difficulty,
+        )
+        quiz_payload = create_quiz(qr)
+        quiz_id = quiz_payload["quiz_id"]
+    else:
+        if store.get_quiz(quiz_id) is None:
+            raise HTTPException(404, "quiz_id not found.")
+
+    if not exam_id:
+        er = ExamRequest(
+            document_id=req.document_id,
+            num_questions=max(2, min(req.num_exam_questions, 4)),
+            topic=req.topic,
+            use_rag=req.use_rag,
+            difficulty=req.difficulty,
+            course_code=req.course_code,
+            course_title=req.course_title,
+        )
+        exam_payload = create_exam(er)
+        exam_id = exam_payload["exam_id"]
+        exam_paper = exam_payload.get("paper")
+        exam_total = exam_payload.get("total_marks")
+        exam_warning = exam_payload.get("warning")
+    else:
+        row = store.get_exam_paper(exam_id)
+        if row is None:
+            raise HTTPException(404, "exam_id not found.")
+        exam_paper = row["paper"]
+        exam_total = 0
+        exam_warning = None
+
+    quiz = store.get_quiz(quiz_id)
+    mixed_id = uuid.uuid4().hex[:12]
+    title = (req.title or "").strip() or "Mixed practice paper"
+    config = {
+        "title": title,
+        "sections": [
+            {
+                "type": "mcq",
+                "quiz_id": quiz_id,
+                "label": "Section A — Multiple choice",
+            },
+            {
+                "type": "exam",
+                "exam_id": exam_id,
+                "label": "Section B — Theory",
+            },
+        ],
+    }
+    store.save_mixed_paper(
+        mixed_id=mixed_id,
+        document_id=req.document_id,
+        title=title,
+        config=config,
+    )
+    return {
+        "mixed_id": mixed_id,
+        "title": title,
+        "document_id": req.document_id,
+        "config": config,
+        "quiz": {
+            "quiz_id": quiz_id,
+            "questions": [
+                {"index": i, "question": q.question, "options": list(q.options)}
+                for i, q in enumerate(quiz["questions"])
+            ]
+            if quiz
+            else [],
+        },
+        "exam": {
+            "exam_id": exam_id,
+            "paper": exam_paper,
+            "total_marks": exam_total,
+            "warning": exam_warning,
+        },
+    }
+
+
+@app.get("/api/mixed/{mixed_id}")
+def get_mixed(mixed_id: str):
+    row = store.get_mixed_paper(mixed_id)
+    if row is None:
+        raise HTTPException(404, "Mixed paper not found.")
+    config = row["config"]
+    quiz_id = None
+    exam_id = None
+    for s in config.get("sections") or []:
+        if s.get("type") == "mcq":
+            quiz_id = s.get("quiz_id")
+        if s.get("type") == "exam":
+            exam_id = s.get("exam_id")
+    quiz_out = None
+    if quiz_id:
+        q = store.get_quiz(quiz_id)
+        if q:
+            quiz_out = {
+                "quiz_id": quiz_id,
+                "questions": [
+                    {"index": i, "question": qq.question, "options": list(qq.options)}
+                    for i, qq in enumerate(q["questions"])
+                ],
+            }
+    exam_out = None
+    if exam_id:
+        e = store.get_exam_paper(exam_id)
+        if e:
+            exam_out = {"exam_id": exam_id, "paper": e["paper"]}
+    return {
+        "mixed_id": mixed_id,
+        "title": row["title"],
+        "document_id": row["document_id"],
+        "config": config,
+        "quiz": quiz_out,
+        "exam": exam_out,
+        "created_at": row["created_at"],
+    }
+
+
+# --- Share ---
+
+
+class ShareCreate(BaseModel):
+    resource_type: str  # quiz | exam | mixed
+    resource_id: str
+    password: str | None = None
+
+
+@app.post("/api/share")
+def create_share(req: ShareCreate):
+    import hashlib
+
+    rtype = (req.resource_type or "").strip().lower()
+    rid = (req.resource_id or "").strip()
+    if rtype not in ("quiz", "exam", "mixed"):
+        raise HTTPException(400, "resource_type must be quiz, exam, or mixed.")
+    if rtype == "quiz" and store.get_quiz(rid) is None:
+        raise HTTPException(404, "Quiz not found.")
+    if rtype == "exam" and store.get_exam_paper(rid) is None:
+        raise HTTPException(404, "Exam not found.")
+    if rtype == "mixed" and store.get_mixed_paper(rid) is None:
+        raise HTTPException(404, "Mixed paper not found.")
+    token = uuid.uuid4().hex[:16]
+    pw_hash = None
+    if req.password and req.password.strip():
+        pw_hash = hashlib.sha256(req.password.strip().encode("utf-8")).hexdigest()
+    store.save_share_token(
+        token=token,
+        resource_type=rtype,
+        resource_id=rid,
+        password_hash=pw_hash,
+    )
+    return {
+        "token": token,
+        "resource_type": rtype,
+        "resource_id": rid,
+        "password_protected": bool(pw_hash),
+        "path": f"?share={token}",
+    }
+
+
+@app.get("/api/share/{token}")
+def resolve_share(token: str, password: str | None = None):
+    import hashlib
+
+    row = store.get_share_token(token)
+    if row is None:
+        raise HTTPException(404, "Share link not found.")
+    if row.get("password_hash"):
+        given = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+        if given != row["password_hash"]:
+            raise HTTPException(401, "Password required or incorrect for this share link.")
+    return {
+        "token": token,
+        "resource_type": row["resource_type"],
+        "resource_id": row["resource_id"],
+        "password_protected": bool(row.get("password_hash")),
+    }
+

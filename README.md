@@ -11,13 +11,17 @@ material instead of hallucinated. A built-in **baseline mode** generates
 questions *without* the retrieved context, which is used in the project's
 evaluation chapter to compare grounded vs ungrounded question quality.
 
-### Two practice modes
+### Practice modes
 
 | Mode | What you get | Scoring |
 |------|----------------|---------|
-| **MCQ Quiz** | Multiple-choice items with 4 options | Automatic |
-| **Exam Quiz** | Nigerian-style theory paper: QUESTION ONE/TWO, parts (a)(b), roman (i)(ii), marks | Self-practice + revision guides (not auto-marked) |
-| **My questions** | You paste/upload past questions; answers (outline + full) come from your notes | Self-check (not auto-marked) |
+| **MCQ Quiz** | Multiple-choice items with 4 options; weak-area re-quiz + flashcards | Automatic |
+| **Exam Quiz** | Nigerian-style theory paper with in-browser writing + marking guides | Self-check (not auto-marked) |
+| **My questions** | Past papers from paste/upload; savable banks; answers from notes | Self-check |
+| **Cards** | Flashcards (stem + reveal) with spaced repetition | Self-grade |
+| **Mixed** | Section A MCQ + Section B theory from the same notes | MCQ auto + theory self-check |
+
+**Share links:** after generate, copy `?quiz=` / `?exam=` / `?mixed=` (or create a `?share=` token). Classmates can take without re-uploading notes when storage is durable (Turso).
 
 Exam Quiz mirrors written BSc papers (Discuss / Define / Explain with mark
 allocations), so students can prepare for exams the way lecturers actually set

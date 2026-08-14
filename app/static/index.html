@@ -123,14 +123,41 @@
 
   /* Mode switch */
   .mode-switch {
-    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.35rem;
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.3rem;
     padding: 0.35rem; background: var(--card); border: 1px solid var(--line);
     border-radius: 14px; box-shadow: var(--shadow); margin: 0 auto 1.25rem;
-    max-width: 560px;
+    max-width: 720px;
   }
-  @media (max-width: 540px) {
-    .mode-switch { grid-template-columns: 1fr; max-width: none; }
+  @media (max-width: 700px) {
+    .mode-switch { grid-template-columns: 1fr 1fr; max-width: none; }
   }
+  @media (max-width: 400px) {
+    .mode-switch { grid-template-columns: 1fr; }
+  }
+  .mode-switch button { font-size: 0.82rem; padding: 0.65rem 0.4rem; }
+  .flash-card {
+    min-height: 160px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 1.25rem; background: var(--paper); margin: 0.75rem 0; cursor: pointer;
+  }
+  .flash-card .face-label { font-size: 0.75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+  .flash-card .face-body { margin-top: 0.65rem; font-size: 1.05rem; line-height: 1.45; }
+  .exam-write {
+    width: 100%; min-height: 5.5rem; margin-top: 0.55rem; font-family: var(--font);
+    font-size: 0.95rem; border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.65rem;
+    resize: vertical; background: #fff;
+  }
+  [data-theme="dark"] .exam-write { background: var(--card); color: var(--ink); }
+  .exam-compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem;
+  }
+  @media (max-width: 700px) {
+    .exam-compare { grid-template-columns: 1fr; }
+  }
+  .exam-compare .col {
+    border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.65rem; background: rgba(0,0,0,0.02);
+  }
+  [data-theme="dark"] .exam-compare .col { background: rgba(255,255,255,0.03); }
+  .exam-compare h4 { font-size: 0.78rem; margin: 0 0 0.35rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .mode-switch button {
     margin: 0; border: 0; background: transparent; color: var(--muted);
     border-radius: 11px; padding: 0.7rem 0.85rem; font-size: 0.9rem;
@@ -567,6 +594,10 @@
       aria-selected="false" aria-controls="setup-panel" tabindex="-1">Exam paper</button>
     <button type="button" role="tab" id="mode-mine" data-mode="mine"
       aria-selected="false" aria-controls="setup-panel" tabindex="-1">My questions</button>
+    <button type="button" role="tab" id="mode-cards" data-mode="cards"
+      aria-selected="false" aria-controls="setup-panel" tabindex="-1">Cards</button>
+    <button type="button" role="tab" id="mode-mixed" data-mode="mixed"
+      aria-selected="false" aria-controls="setup-panel" tabindex="-1">Mixed</button>
   </div>
 
 <main>
@@ -673,9 +704,15 @@
         <input type="checkbox" id="require-grounding" checked />
         <label for="require-grounding">Only keep questions verified against the notes</label>
       </div>
+      <div class="toggle" id="weak-toggle">
+        <input type="checkbox" id="focus-weak" />
+        <label for="focus-weak">Focus on weak areas (re-quiz mistakes / due cards)</label>
+      </div>
+      <p class="hint hidden" id="due-hint" style="margin-top:0.35rem"></p>
 
       <div class="btn-row">
         <button type="button" id="generate-btn">Start practice</button>
+        <button class="secondary hidden" type="button" id="copy-share-btn">Copy share link</button>
       </div>
     </div>
 
@@ -689,8 +726,45 @@ Or paste any past-question list…"></textarea>
       <label class="field-label" for="questions-file">Or upload a questions file</label>
       <input type="file" id="questions-file" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
       <p class="hint" style="margin-top:0.35rem">PDF, Word, or text — large files use the same secure upload as notes (up to 100&nbsp;MB).</p>
+      <div id="bank-panel" style="margin-top:0.85rem">
+        <label class="field-label" for="bank-select">Saved past papers</label>
+        <select id="bank-select">
+          <option value="">Choose a saved set…</option>
+        </select>
+        <div class="btn-row">
+          <button class="secondary" type="button" id="load-bank-btn">Load into box</button>
+          <button class="secondary" type="button" id="delete-bank-btn">Delete saved</button>
+        </div>
+      </div>
       <div class="btn-row">
         <button type="button" id="answer-notes-btn">Generate answers from notes</button>
+        <button class="secondary" type="button" id="save-bank-btn">Save as past paper</button>
+      </div>
+    </div>
+
+    <div id="cards-options" class="hidden">
+      <p class="hint">Flip cards built from your quizzes or My questions answers. Graded with spaced repetition (Again / Good).</p>
+      <div class="btn-row">
+        <button type="button" id="cards-study-btn">Study due cards</button>
+        <button class="secondary" type="button" id="cards-from-quiz-btn">Build from last quiz</button>
+        <button class="secondary" type="button" id="cards-from-mine-btn">Build from last My answers</button>
+      </div>
+    </div>
+
+    <div id="mixed-options" class="hidden">
+      <p class="hint">One paper: Section A (MCQ) + Section B (theory) from the same notes. Uses two generation calls.</p>
+      <div class="row">
+        <div>
+          <label class="field-label" for="mixed-mcq">MCQ count</label>
+          <input type="number" id="mixed-mcq" min="3" max="10" value="5" />
+        </div>
+        <div>
+          <label class="field-label" for="mixed-exam">Theory major questions</label>
+          <input type="number" id="mixed-exam" min="2" max="4" value="2" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="mixed-generate-btn">Generate mixed paper</button>
       </div>
     </div>
 
@@ -719,7 +793,42 @@ Or paste any past-question list…"></textarea>
     <div class="actions no-print">
       <button class="secondary" id="mine-again-btn" type="button">Edit questions</button>
       <button class="secondary" id="print-mine-btn" type="button">Print / PDF</button>
+      <button class="secondary" id="mine-to-cards-btn" type="button">Make flashcards</button>
     </div>
+  </section>
+
+  <section class="card hidden" id="cards-card">
+    <div class="card-head">
+      <div>
+        <span class="step">Cards</span>
+        <h2 id="cards-title">Flashcards</h2>
+      </div>
+    </div>
+    <p class="hint no-print" id="cards-status">No cards loaded yet.</p>
+    <div id="flash-stage" class="flash-card hidden" tabindex="0" role="button" aria-label="Flashcard, click to flip">
+      <div class="face-label" id="flash-face-label">Front</div>
+      <div class="face-body" id="flash-face-body"></div>
+    </div>
+    <div class="actions no-print" id="cards-actions" style="display:none">
+      <button type="button" id="flash-reveal-btn">Reveal</button>
+      <button class="secondary" type="button" id="flash-again-btn">Again</button>
+      <button type="button" id="flash-good-btn">Good</button>
+    </div>
+  </section>
+
+  <section class="card hidden" id="mixed-card">
+    <div class="card-head">
+      <div>
+        <span class="step">Mixed</span>
+        <h2 id="mixed-title">Mixed paper</h2>
+      </div>
+    </div>
+    <div id="mixed-body"></div>
+    <div class="actions no-print">
+      <button type="button" id="mixed-submit-mcq-btn">Submit Section A (MCQ)</button>
+      <button class="secondary" type="button" id="mixed-copy-link-btn">Copy share link</button>
+    </div>
+    <div class="status" id="mixed-status" role="status" aria-live="polite"></div>
   </section>
 
   <section class="card hidden" id="quiz-card">
@@ -758,6 +867,8 @@ Or paste any past-question list…"></textarea>
       <button class="secondary" id="review-all-btn" type="button">Show all</button>
       <button class="secondary" id="print-results-btn" type="button">Print results</button>
       <button class="secondary" id="copy-summary-btn" type="button">Copy score</button>
+      <button class="secondary" id="results-to-cards-btn" type="button">Make flashcards</button>
+      <button class="secondary" id="copy-quiz-link-btn" type="button">Copy quiz link</button>
       <button class="secondary" id="export-csv" type="button">Export CSV</button>
     </div>
   </section>
@@ -770,19 +881,21 @@ Or paste any past-question list…"></textarea>
       </div>
     </div>
     <div class="study-path no-print">
-      <div><strong>1</strong>Write answers offline</div>
+      <div><strong>1</strong>Write in the boxes</div>
       <div><strong>2</strong>Generate guides</div>
-      <div><strong>3</strong>Compare &amp; learn</div>
+      <div><strong>3</strong>Compare side-by-side</div>
     </div>
     <p class="hint no-print" style="margin-top:0.85rem">
-      Sit with pen and paper first — then unlock marking guides from your notes to self-check.
+      Type answers under each part (autosaved). Then unlock marking guides from your notes to self-check — not auto-marked.
     </p>
     <div id="exam-sheet" class="exam-sheet"></div>
-    <div class="status" id="exam-answer-status"></div>
+    <div class="status" id="exam-answer-status" role="status" aria-live="polite"></div>
     <div class="actions no-print">
       <button type="button" id="gen-answers-btn">Generate answers from my notes</button>
       <button class="secondary" id="toggle-guides-btn" type="button">Show marking guide</button>
+      <button class="secondary" id="save-exam-writing-btn" type="button">Save my written answers</button>
       <button class="secondary" id="print-exam-btn" type="button">Print / PDF</button>
+      <button class="secondary" id="copy-exam-link-btn" type="button">Copy exam link</button>
       <button class="secondary" id="exam-again-btn" type="button">New paper</button>
     </div>
   </section>
@@ -800,10 +913,17 @@ let quizMeta = { difficulty: "medium" };
 let timerInterval = null;
 let timerEndsAt = null;
 let reviewWrongOnly = false;
-let appMode = "mcq"; // mcq | exam | mine
+let appMode = "mcq"; // mcq | exam | mine | cards | mixed
 let guidesVisible = false;
 let lastExamPayload = null;
 let setupHidden = false;
+let lastMinePayload = null;
+let examAttemptId = null;
+let flashDeck = [];
+let flashIndex = 0;
+let flashRevealed = false;
+let mixedState = null;
+let takeOnlyMode = false;
 
 function setSetupHidden(hidden) {
   setupHidden = !!hidden;
@@ -918,15 +1038,20 @@ loadAuthHint();
 function setMode(mode) {
   if (mode === "exam") appMode = "exam";
   else if (mode === "mine") appMode = "mine";
+  else if (mode === "cards") appMode = "cards";
+  else if (mode === "mixed") appMode = "mixed";
   else appMode = "mcq";
 
   const tabs = [
     { id: "mode-mcq", mode: "mcq" },
     { id: "mode-exam", mode: "exam" },
     { id: "mode-mine", mode: "mine" },
+    { id: "mode-cards", mode: "cards" },
+    { id: "mode-mixed", mode: "mixed" },
   ];
   tabs.forEach(({ id, mode: m }) => {
     const btn = $(id);
+    if (!btn) return;
     const on = appMode === m;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-selected", on ? "true" : "false");
@@ -935,32 +1060,48 @@ function setMode(mode) {
 
   const isExam = appMode === "exam";
   const isMine = appMode === "mine";
+  const isCards = appMode === "cards";
+  const isMixed = appMode === "mixed";
+  const isMcqLike = appMode === "mcq" || isExam;
 
   $("options-title").textContent = isMine
     ? "Your questions"
     : isExam
       ? "Generate an exam paper"
-      : "Build your practice";
+      : isCards
+        ? "Flashcards"
+        : isMixed
+          ? "Mixed paper"
+          : "Build your practice";
   $("mode-hint").textContent = isMine
-    ? "Paste or upload past questions — answers are drawn from the notes you uploaded."
+    ? "Paste or upload past questions — answers from your notes. Save sets to re-use."
     : isExam
-      ? "Full theory-style paper with parts and marks — practice like the real exam, then unlock guides from your notes."
-      : "Multiple-choice practice with instant scoring — great for daily revision.";
+      ? "Theory paper with in-browser writing, then unlock marking guides to self-check."
+      : isCards
+        ? "Lighter practice: stem + reveal, spaced repetition."
+        : isMixed
+          ? "Section A MCQ + Section B theory from the same notes."
+          : "Multiple-choice practice with scoring, weak-area review, and share links.";
 
-  $("mcq-exam-options").classList.toggle("hidden", isMine);
+  $("mcq-exam-options").classList.toggle("hidden", !isMcqLike);
   $("mine-options").classList.toggle("hidden", !isMine);
+  if ($("cards-options")) $("cards-options").classList.toggle("hidden", !isCards);
+  if ($("mixed-options")) $("mixed-options").classList.toggle("hidden", !isMixed);
+  if ($("weak-toggle")) $("weak-toggle").classList.toggle("hidden", !isExam && appMode !== "mcq" ? true : isExam);
+  if ($("weak-toggle") && appMode === "mcq") $("weak-toggle").classList.remove("hidden");
+  if ($("weak-toggle") && isExam) $("weak-toggle").classList.add("hidden");
 
-  if (!isMine) {
+  if (isMcqLike) {
     $("num-label").textContent = isExam ? "Number of major questions (QUESTION ONE…)" : "Number of questions";
     $("num").min = isExam ? 2 : 1;
     $("num").max = isExam ? 6 : 15;
-    $("num").value = isExam ? 3 : 5;
+    if (!$("num").dataset.userSet) $("num").value = isExam ? 3 : 5;
     $("exam-fields").classList.toggle("hidden", !isExam);
     $("timer-field").classList.toggle("hidden", isExam);
     $("time-allowed-field").classList.toggle("hidden", !isExam);
     $("grounding-toggle").classList.toggle("hidden", isExam);
     $("generate-btn").textContent = isExam ? "Generate exam paper" : "Start practice";
-    // Focus topic is always optional (steers retrieval/prompts when filled)
+    $("generate-btn").classList.toggle("hidden", false);
     const topicOpt = $("topic-optional");
     if (topicOpt) {
       topicOpt.textContent = "(optional)";
@@ -972,30 +1113,41 @@ function setMode(mode) {
     $("topic").placeholder = isExam
       ? "e.g. cryptography, network security, IPSec"
       : "e.g. process scheduling";
+  } else {
+    $("generate-btn").classList.add("hidden");
   }
 
   // Hide step-3 cards when switching
-  $("quiz-card").classList.add("hidden");
-  $("result-card").classList.add("hidden");
-  $("exam-card").classList.add("hidden");
-  $("mine-results-card").classList.add("hidden");
+  ["quiz-card","result-card","exam-card","mine-results-card","cards-card","mixed-card"].forEach((id) => {
+    const el = $(id);
+    if (el) el.classList.add("hidden");
+  });
   $("generate-status").textContent = "";
   $("generate-status").className = "status";
-  // Show setup again when changing mode so user can configure
-  setSetupHidden(false);
-  $("setup-toggle-bar").classList.remove("visible");
+  $("generate-status").style.color = "";
+  if (!takeOnlyMode) {
+    setSetupHidden(false);
+    $("setup-toggle-bar").classList.remove("visible");
+  }
+  if (appMode === "mcq") refreshDueHint();
+  if (appMode === "mine") refreshBankList();
 }
 
 $("mode-mcq").onclick = () => setMode("mcq");
 $("mode-exam").onclick = () => setMode("exam");
 $("mode-mine").onclick = () => setMode("mine");
+if ($("mode-cards")) $("mode-cards").onclick = () => setMode("cards");
+if ($("mode-mixed")) $("mode-mixed").onclick = () => setMode("mixed");
 
 // Keyboard support for study-mode tabs (arrow keys / Home / End)
 (function initModeTabs() {
   const tablist = $("mode-tablist");
   if (!tablist) return;
-  const order = ["mode-mcq", "mode-exam", "mode-mine"];
-  const modes = { "mode-mcq": "mcq", "mode-exam": "exam", "mode-mine": "mine" };
+  const order = ["mode-mcq", "mode-exam", "mode-mine", "mode-cards", "mode-mixed"];
+  const modes = {
+    "mode-mcq": "mcq", "mode-exam": "exam", "mode-mine": "mine",
+    "mode-cards": "cards", "mode-mixed": "mixed",
+  };
   tablist.addEventListener("keydown", (e) => {
     const i = order.indexOf(document.activeElement && document.activeElement.id);
     if (i < 0) return;
@@ -1007,6 +1159,7 @@ $("mode-mine").onclick = () => setMode("mine");
     if (next < 0) return;
     e.preventDefault();
     const id = order[next];
+    if (!$(id)) return;
     setMode(modes[id]);
     $(id).focus();
   });
@@ -2002,12 +2155,20 @@ function renderExamPaper(exam) {
       }
       html += `</div><div class="marks">(${esc(marksLabel)})</div></div>`;
 
+      const key = `${q.number}-${part.label}`;
+      // Student writing box (always visible)
+      html += `<label class="field-label no-print" for="write-${esc(key)}" style="margin-top:0.5rem">Your answer</label>`;
+      html += `<textarea class="exam-write no-print" id="write-${esc(key)}" data-key="${esc(key)}" placeholder="Write your answer here…"></textarea>`;
+
       // Answer guide (hidden until generated + toggled)
       html += `<div class="exam-guide guide-block hidden">`;
       const hasOutline = part.answer_outline && String(part.answer_outline).trim();
       const hasPoints = part.guide_points && part.guide_points.length;
+      html += `<div class="exam-compare">`;
+      html += `<div class="col"><h4>Your writing</h4><div class="student-mirror" data-mirror="${esc(key)}"><em class="no-print">Saved text appears here when guides are open.</em></div></div>`;
+      html += `<div class="col"><h4>Marking guide</h4>`;
       if (hasOutline) {
-        html += `<strong>Model answer outline</strong> <span style="font-weight:normal;color:var(--muted)">(from your notes)</span><p style="margin:0.35rem 0 0.5rem">${esc(part.answer_outline)}</p>`;
+        html += `<strong>Model outline</strong><p style="margin:0.35rem 0 0.5rem">${esc(part.answer_outline)}</p>`;
       }
       if (hasPoints) {
         html += `<strong>Marking points</strong><ul>`;
@@ -2015,18 +2176,18 @@ function renderExamPaper(exam) {
         html += `</ul>`;
       }
       if (!hasOutline && !hasPoints) {
-        html += `<em>No answer guide yet. Click “Generate answers from my notes” after you attempt this part.</em>`;
+        html += `<em>No guide yet. Click “Generate answers from my notes”.</em>`;
       }
       const g = part.grounding;
       if (part.source_quote || g) {
-        html += `<div class="exam-quote grounding-inline">`;
+        html += `<div class="exam-quote grounding-inline" style="margin-top:0.5rem">`;
         if (g) html += softGroundingBadgeHtml(g, esc);
         if (part.source_quote) {
           html += `<span>From material: “${esc(part.source_quote)}”</span>`;
         }
         html += `</div>`;
       }
-      html += `</div></div>`;
+      html += `</div></div></div></div>`;
     });
     html += `</div>`;
   });
@@ -2035,6 +2196,8 @@ function renderExamPaper(exam) {
   if (guidesVisible) {
     document.querySelectorAll(".guide-block").forEach((el) => el.classList.remove("hidden"));
   }
+  wireExamWriting();
+  loadExamDraftIntoTextareas();
 }
 
 function paperHasGuides(paper) {
@@ -2357,6 +2520,580 @@ renderGroundingMetrics = function(g, el, retrieval) {
     const det = el.closest("details");
     if (det) det.open = false; // keep collapsed by default for clean UX
   }
+};
+
+// =====================================================================
+// Study loop: weak areas, exam writing, cards, banks, mixed, deep links
+// =====================================================================
+
+async function refreshDueHint() {
+  const el = $("due-hint");
+  if (!el || !docId) { if (el) el.classList.add("hidden"); return; }
+  try {
+    const d = await api(`/api/study/due?document_id=${encodeURIComponent(docId)}&limit=1`);
+    if (d.due_count > 0) {
+      el.textContent = `${d.due_count} weak/due card(s) ready — enable “Focus on weak areas” or open Cards.`;
+      el.classList.remove("hidden");
+    } else el.classList.add("hidden");
+  } catch (_) { el.classList.add("hidden"); }
+}
+
+function shareUrl(params) {
+  const u = new URL(window.location.href);
+  u.search = "";
+  Object.entries(params).forEach(([k, v]) => { if (v != null && v !== "") u.searchParams.set(k, v); });
+  return u.toString();
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (_) { window.prompt("Copy this link:", text); return false; }
+}
+
+// --- Weak-area MCQ ---
+const _generateMcq = generateMcq;
+generateMcq = async function() {
+  if ($("focus-weak") && $("focus-weak").checked) {
+    const status = $("generate-status");
+    $("generate-btn").disabled = true;
+    status.className = "status"; status.textContent = "Building quiz from weak areas…";
+    try {
+      if (!docId) throw new Error("Upload your lecture notes first (Step 1).");
+      const quiz = await api("/api/study/quiz-from-wrong", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: docId, limit: parseInt($("num").value, 10) || 8 }),
+      });
+      quizId = quiz.quiz_id;
+      questionCount = quiz.questions.length;
+      quizMeta.difficulty = "medium";
+      lastResult = null;
+      reviewWrongOnly = false;
+      renderQuiz(quiz.questions);
+      status.textContent = "Weak-area quiz ready — no new generation needed.";
+      $("result-card").classList.add("hidden");
+      $("exam-card").classList.add("hidden");
+      $("mine-results-card").classList.add("hidden");
+      $("quiz-card").classList.remove("hidden");
+      $("submit-btn").classList.remove("hidden");
+      $("submit-btn").disabled = false;
+      $("quiz-title").textContent = "Weak-area quiz";
+      hideSetupForResults();
+      $("quiz-card").scrollIntoView({ behavior: "smooth" });
+    } catch (e) {
+      status.textContent = e.message + " Falling back to a fresh quiz…";
+      status.className = "status";
+      return _generateMcq();
+    } finally {
+      $("generate-btn").disabled = false;
+    }
+    return;
+  }
+  return _generateMcq();
+};
+
+// --- Exam writing ---
+let examWriteTimer = null;
+function collectExamAnswers() {
+  const answers = {};
+  document.querySelectorAll("textarea.exam-write").forEach((ta) => {
+    answers[ta.dataset.key] = ta.value || "";
+  });
+  return answers;
+}
+function wireExamWriting() {
+  document.querySelectorAll("textarea.exam-write").forEach((ta) => {
+    ta.addEventListener("input", () => {
+      const mir = document.querySelector(`[data-mirror="${ta.dataset.key}"]`);
+      if (mir) mir.textContent = ta.value || "(empty)";
+      clearTimeout(examWriteTimer);
+      examWriteTimer = setTimeout(() => saveExamDraftSilent(), 1200);
+      try {
+        if (examId) localStorage.setItem("sq-exam-draft-" + examId, JSON.stringify(collectExamAnswers()));
+      } catch (_) {}
+    });
+  });
+}
+async function saveExamDraftSilent() {
+  if (!examId) return;
+  try {
+    const res = await api(`/api/exam/${examId}/draft`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers: collectExamAnswers(), attempt_id: examAttemptId }),
+    });
+    examAttemptId = res.attempt_id;
+  } catch (_) { /* offline / pin — localStorage still holds draft */ }
+}
+async function loadExamDraftIntoTextareas() {
+  if (!examId) return;
+  let answers = {};
+  try {
+    const d = await api(`/api/exam/${examId}/draft`);
+    if (d.answers) answers = d.answers;
+    if (d.id) examAttemptId = d.id;
+  } catch (_) {
+    try {
+      answers = JSON.parse(localStorage.getItem("sq-exam-draft-" + examId) || "{}");
+    } catch (__) {}
+  }
+  document.querySelectorAll("textarea.exam-write").forEach((ta) => {
+    if (answers[ta.dataset.key] != null) ta.value = answers[ta.dataset.key];
+    const mir = document.querySelector(`[data-mirror="${ta.dataset.key}"]`);
+    if (mir) mir.textContent = ta.value || "(empty)";
+  });
+}
+if ($("save-exam-writing-btn")) {
+  $("save-exam-writing-btn").onclick = async () => {
+    const st = $("exam-answer-status");
+    try {
+      const res = await api(`/api/exam/${examId}/submit-writing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers: collectExamAnswers(), attempt_id: examAttemptId }),
+      });
+      examAttemptId = res.attempt_id;
+      st.textContent = res.message || "Written answers saved.";
+      st.className = "status";
+    } catch (e) {
+      st.textContent = e.message; st.className = "status error";
+    }
+  };
+}
+
+// --- Banks ---
+async function refreshBankList() {
+  const sel = $("bank-select");
+  if (!sel) return;
+  try {
+    const banks = await api("/api/banks");
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">Choose a saved set…</option>';
+    (banks || []).forEach((b) => {
+      const o = document.createElement("option");
+      o.value = b.id;
+      o.textContent = `${b.title} (${b.question_count} Qs)`;
+      sel.appendChild(o);
+    });
+    if (prev) sel.value = prev;
+  } catch (_) {}
+}
+if ($("save-bank-btn")) {
+  $("save-bank-btn").onclick = async () => {
+    const status = $("generate-status");
+    try {
+      const title = window.prompt("Name for this past paper:", "Past paper");
+      if (title === null) return;
+      const body = {
+        title: title || "Past paper",
+        questions_text: $("questions-text").value,
+        document_id: docId,
+      };
+      if (lastMinePayload && lastMinePayload.answers) {
+        body.questions = lastMinePayload.answers.map((a) => a.question).filter(Boolean);
+      }
+      const res = await api("/api/banks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      status.textContent = `Saved “${res.title}” (${res.question_count} questions).`;
+      status.className = "status";
+      refreshBankList();
+    } catch (e) {
+      status.textContent = e.message; status.className = "status error";
+    }
+  };
+}
+if ($("load-bank-btn")) {
+  $("load-bank-btn").onclick = async () => {
+    const id = $("bank-select").value;
+    if (!id) return;
+    try {
+      const b = await api(`/api/banks/${id}`);
+      $("questions-text").value = (b.questions || []).map((q, i) => `${i + 1}. ${q}`).join("\n\n");
+      $("generate-status").textContent = `Loaded “${b.title}”.`;
+    } catch (e) {
+      $("generate-status").textContent = e.message;
+      $("generate-status").className = "status error";
+    }
+  };
+}
+if ($("delete-bank-btn")) {
+  $("delete-bank-btn").onclick = async () => {
+    const id = $("bank-select").value;
+    if (!id || !confirm("Delete this saved past paper?")) return;
+    await api(`/api/banks/${id}`, { method: "DELETE" });
+    refreshBankList();
+  };
+}
+
+// Capture mine payload for flashcards / banks
+const _renderMine = renderMineAnswers;
+renderMineAnswers = function(payload) {
+  lastMinePayload = payload;
+  _renderMine(payload);
+};
+
+// --- Flashcards ---
+function showFlashCard() {
+  const stage = $("flash-stage");
+  const actions = $("cards-actions");
+  if (!flashDeck.length) {
+    stage.classList.add("hidden");
+    actions.style.display = "none";
+    $("cards-status").textContent = "No due cards. Build a deck from a quiz or My questions first.";
+    return;
+  }
+  if (flashIndex >= flashDeck.length) {
+    $("cards-status").textContent = "Deck finished for now. Great work.";
+    stage.classList.add("hidden");
+    actions.style.display = "none";
+    return;
+  }
+  const c = flashDeck[flashIndex];
+  flashRevealed = false;
+  stage.classList.remove("hidden");
+  actions.style.display = "flex";
+  $("flash-face-label").textContent = `Front · ${flashIndex + 1} / ${flashDeck.length}`;
+  $("flash-face-body").textContent = c.front || c.question || "";
+  $("cards-status").textContent = "Tap the card or Reveal, then grade yourself.";
+  $("flash-again-btn").classList.add("hidden");
+  $("flash-good-btn").classList.add("hidden");
+  $("flash-reveal-btn").classList.remove("hidden");
+}
+function revealFlash() {
+  if (!flashDeck[flashIndex]) return;
+  const c = flashDeck[flashIndex];
+  flashRevealed = true;
+  $("flash-face-label").textContent = "Back";
+  $("flash-face-body").textContent = c.back || c.explanation || "(no answer text)";
+  $("flash-reveal-btn").classList.add("hidden");
+  $("flash-again-btn").classList.remove("hidden");
+  $("flash-good-btn").classList.remove("hidden");
+}
+async function gradeFlash(grade) {
+  const c = flashDeck[flashIndex];
+  if (!c || !c.id) { flashIndex++; showFlashCard(); return; }
+  try {
+    await api("/api/study/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ card_id: c.id, grade }),
+    });
+  } catch (_) {}
+  flashIndex++;
+  showFlashCard();
+}
+if ($("cards-study-btn")) {
+  $("cards-study-btn").onclick = async () => {
+    if (!docId) {
+      $("generate-status").textContent = "Select notes first (Step 1).";
+      $("generate-status").className = "status error";
+      return;
+    }
+    try {
+      const d = await api(`/api/study/due?document_id=${encodeURIComponent(docId)}&limit=20`);
+      flashDeck = d.cards || [];
+      flashIndex = 0;
+      $("cards-card").classList.remove("hidden");
+      hideSetupForResults();
+      showFlashCard();
+    } catch (e) {
+      $("generate-status").textContent = e.message;
+      $("generate-status").className = "status error";
+    }
+  };
+}
+if ($("flash-reveal-btn")) $("flash-reveal-btn").onclick = revealFlash;
+if ($("flash-stage")) $("flash-stage").onclick = () => { if (!flashRevealed) revealFlash(); };
+if ($("flash-again-btn")) $("flash-again-btn").onclick = () => gradeFlash("again");
+if ($("flash-good-btn")) $("flash-good-btn").onclick = () => gradeFlash("good");
+if ($("cards-from-quiz-btn")) {
+  $("cards-from-quiz-btn").onclick = async () => {
+    if (!quizId) {
+      $("generate-status").textContent = "Take a quiz first.";
+      $("generate-status").className = "status error";
+      return;
+    }
+    const r = await api("/api/flashcards/from-quiz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quiz_id: quizId }),
+    });
+    $("generate-status").textContent = `Added ${r.cards_added} cards (${r.due_count} due).`;
+  };
+}
+if ($("cards-from-mine-btn") || $("mine-to-cards-btn")) {
+  const go = async () => {
+    if (!docId || !lastMinePayload) {
+      $("generate-status").textContent = "Answer My questions first.";
+      $("generate-status").className = "status error";
+      return;
+    }
+    const r = await api("/api/flashcards/from-mine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_id: docId, answers: lastMinePayload.answers || [] }),
+    });
+    $("generate-status").textContent = `Added ${r.cards_added} cards from My answers.`;
+  };
+  if ($("cards-from-mine-btn")) $("cards-from-mine-btn").onclick = go;
+  if ($("mine-to-cards-btn")) $("mine-to-cards-btn").onclick = go;
+}
+if ($("results-to-cards-btn")) {
+  $("results-to-cards-btn").onclick = async () => {
+    if (!quizId) return;
+    const r = await api("/api/flashcards/from-quiz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quiz_id: quizId }),
+    });
+    alert(`Added ${r.cards_added} flashcards from this quiz.`);
+  };
+}
+
+// --- Mixed ---
+if ($("mixed-generate-btn")) {
+  $("mixed-generate-btn").onclick = async () => {
+    const status = $("generate-status");
+    if (!docId) {
+      status.textContent = "Upload notes first.";
+      status.className = "status error";
+      return;
+    }
+    $("mixed-generate-btn").disabled = true;
+    status.textContent = "Generating MCQ + theory (two steps)…";
+    try {
+      const mixed = await api("/api/mixed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document_id: docId,
+          num_mcq: parseInt($("mixed-mcq").value, 10) || 5,
+          num_exam_questions: parseInt($("mixed-exam").value, 10) || 2,
+          topic: $("topic").value.trim() || null,
+          difficulty: $("difficulty").value || "medium",
+          use_rag: $("use-rag").checked,
+          require_grounding: $("use-rag").checked && $("require-grounding").checked,
+          course_code: $("course-code").value.trim() || null,
+          course_title: $("course-title").value.trim() || null,
+        }),
+      });
+      mixedState = mixed;
+      quizId = mixed.quiz && mixed.quiz.quiz_id;
+      examId = mixed.exam && mixed.exam.exam_id;
+      renderMixed(mixed);
+      status.textContent = "";
+      hideSetupForResults();
+    } catch (e) {
+      status.textContent = e.message;
+      status.className = "status error";
+    } finally {
+      $("mixed-generate-btn").disabled = false;
+    }
+  };
+}
+function renderMixed(mixed) {
+  const body = $("mixed-body");
+  $("mixed-card").classList.remove("hidden");
+  $("mixed-title").textContent = mixed.title || "Mixed paper";
+  let html = "";
+  if (mixed.quiz && mixed.quiz.questions) {
+    html += `<h3>Section A — Multiple choice</h3><div id="mixed-mcq-questions"></div>`;
+  }
+  if (mixed.exam && mixed.exam.paper) {
+    html += `<h3 style="margin-top:1.25rem">Section B — Theory</h3><div id="mixed-exam-sheet" class="exam-sheet"></div>`;
+  }
+  body.innerHTML = html;
+  if (mixed.quiz) {
+    questionCount = mixed.quiz.questions.length;
+    // Temporarily point questions container
+    const holder = $("mixed-mcq-questions");
+    mixed.quiz.questions.forEach((q, qi) => {
+      const div = document.createElement("div");
+      div.className = "question";
+      div.dataset.index = qi;
+      const p = document.createElement("p");
+      p.className = "q";
+      p.textContent = `${qi + 1}. ${q.question}`;
+      div.appendChild(p);
+      (q.options || []).forEach((opt, oi) => {
+        const label = document.createElement("label");
+        label.className = "option";
+        const radio = document.createElement("input");
+        radio.type = "radio"; radio.name = `mq${qi}`; radio.value = oi;
+        label.appendChild(radio);
+        label.appendChild(document.createTextNode(opt));
+        div.appendChild(label);
+      });
+      holder.appendChild(div);
+    });
+  }
+  if (mixed.exam) {
+    // Reuse exam renderer into mixed sheet via temp swap
+    const real = $("exam-sheet");
+    const fakeId = "mixed-exam-sheet";
+    const prev = real.id;
+    // Render into mixed-exam-sheet by temporarily replacing exam-sheet reference
+    const target = document.getElementById(fakeId);
+    if (target) {
+      const examPayload = { paper: mixed.exam.paper, total_marks: mixed.exam.total_marks };
+      // manual minimal theory render
+      renderExamPaper(examPayload);
+      target.innerHTML = $("exam-sheet").innerHTML;
+      $("exam-sheet").innerHTML = "";
+      // restore writing wires on mixed sheet
+      target.querySelectorAll("textarea.exam-write").forEach((ta) => {
+        ta.addEventListener("input", () => {
+          clearTimeout(examWriteTimer);
+          examWriteTimer = setTimeout(() => saveExamDraftSilent(), 1200);
+        });
+      });
+    }
+  }
+  $("mixed-card").scrollIntoView({ behavior: "smooth" });
+}
+if ($("mixed-submit-mcq-btn")) {
+  $("mixed-submit-mcq-btn").onclick = async () => {
+    if (!quizId) return;
+    const answers = [];
+    for (let i = 0; i < questionCount; i++) {
+      const el = document.querySelector(`input[name="mq${i}"]:checked`);
+      answers.push(el ? parseInt(el.value, 10) : -1);
+    }
+    try {
+      const result = await api(`/api/quiz/${quizId}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers }),
+      });
+      $("mixed-status").textContent =
+        `Section A score: ${result.score} / ${result.total}. Theory is self-check only.`;
+    } catch (e) {
+      $("mixed-status").textContent = e.message;
+      $("mixed-status").className = "status error";
+    }
+  };
+}
+if ($("mixed-copy-link-btn")) {
+  $("mixed-copy-link-btn").onclick = async () => {
+    if (!mixedState || !mixedState.mixed_id) return;
+    const ok = await copyText(shareUrl({ mode: "mixed", mixed: mixedState.mixed_id }));
+    $("mixed-status").textContent = ok ? "Link copied." : "Copy the link from the prompt.";
+  };
+}
+
+// Share copy buttons
+if ($("copy-quiz-link-btn")) {
+  $("copy-quiz-link-btn").onclick = async () => {
+    if (!quizId) return;
+    await copyText(shareUrl({ mode: "mcq", quiz: quizId }));
+    alert("Quiz link copied.");
+  };
+}
+if ($("copy-exam-link-btn")) {
+  $("copy-exam-link-btn").onclick = async () => {
+    if (!examId) return;
+    await copyText(shareUrl({ mode: "exam", exam: examId }));
+    alert("Exam link copied.");
+  };
+}
+
+// Deep-link boot
+async function bootDeepLink() {
+  const params = new URLSearchParams(window.location.search);
+  const share = params.get("share");
+  let mode = params.get("mode");
+  let quiz = params.get("quiz");
+  let exam = params.get("exam");
+  let mixed = params.get("mixed");
+  const doc = params.get("doc");
+  if (share) {
+    try {
+      let pw = null;
+      let data;
+      try {
+        data = await api(`/api/share/${encodeURIComponent(share)}`);
+      } catch (e) {
+        if (String(e.message).toLowerCase().includes("password")) {
+          pw = window.prompt("Password for this share link:");
+          data = await api(`/api/share/${encodeURIComponent(share)}?password=${encodeURIComponent(pw || "")}`);
+        } else throw e;
+      }
+      if (data.resource_type === "quiz") { quiz = data.resource_id; mode = "mcq"; }
+      if (data.resource_type === "exam") { exam = data.resource_id; mode = "exam"; }
+      if (data.resource_type === "mixed") { mixed = data.resource_id; mode = "mixed"; }
+    } catch (e) {
+      alert(e.message || "Could not open share link.");
+      return;
+    }
+  }
+  if (doc) {
+    try {
+      const docs = await api("/api/documents");
+      const hit = (docs || []).find((d) => d.id === doc);
+      if (hit) selectDocument(doc, hit.title, `Using shared document: ${hit.title}`);
+      else docId = doc;
+    } catch (_) { docId = doc; }
+  }
+  if (quiz) {
+    takeOnlyMode = true;
+    setMode(mode || "mcq");
+    try {
+      const q = await api(`/api/quiz/${encodeURIComponent(quiz)}`);
+      quizId = q.quiz_id;
+      if (q.document_id) docId = q.document_id;
+      questionCount = q.questions.length;
+      renderQuiz(q.questions);
+      $("quiz-title").textContent = "Shared quiz";
+      $("quiz-card").classList.remove("hidden");
+      $("upload-card").classList.add("hidden");
+      setSetupHidden(true);
+      const mins = parseInt(params.get("mins") || "0", 10);
+      if (mins > 0) startTimer(mins);
+    } catch (e) {
+      alert(e.message || "Could not load quiz.");
+    }
+  } else if (exam) {
+    takeOnlyMode = true;
+    setMode("exam");
+    try {
+      const ex = await api(`/api/exam/${encodeURIComponent(exam)}`);
+      examId = ex.exam_id;
+      lastExamPayload = ex;
+      renderExamPaper(ex);
+      $("exam-card").classList.remove("hidden");
+      $("upload-card").classList.add("hidden");
+      setSetupHidden(true);
+    } catch (e) {
+      alert(e.message || "Could not load exam.");
+    }
+  } else if (mixed) {
+    takeOnlyMode = true;
+    setMode("mixed");
+    try {
+      const m = await api(`/api/mixed/${encodeURIComponent(mixed)}`);
+      mixedState = m;
+      quizId = m.quiz && m.quiz.quiz_id;
+      examId = m.exam && m.exam.exam_id;
+      renderMixed(m);
+      $("upload-card").classList.add("hidden");
+      setSetupHidden(true);
+    } catch (e) {
+      alert(e.message || "Could not load mixed paper.");
+    }
+  } else if (mode) {
+    setMode(mode);
+  }
+}
+bootDeepLink();
+
+// After selecting a document, refresh due hint
+const _selectDocument = selectDocument;
+selectDocument = function(id, title, detail) {
+  _selectDocument(id, title, detail);
+  refreshDueHint();
 };
 
 </script>
