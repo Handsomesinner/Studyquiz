@@ -371,22 +371,6 @@ def list_documents():
     return store.list_documents()
 
 
-@app.get("/api/documents/{doc_id}/topics")
-def document_topics(doc_id: str, limit: int = 16):
-    """Suggest focus topics from headings and frequent phrases in the notes."""
-    from . import topics as topics_mod
-
-    doc = store.get_document(doc_id)
-    if doc is None:
-        raise HTTPException(404, "Document not found.")
-    text = doc.get("text") or "\n\n".join(doc.get("chunks") or [])
-    items = topics_mod.topic_map(text, max_topics=limit)
-    return {
-        "document_id": doc_id,
-        "title": doc.get("title"),
-        "topics": items,
-    }
-
 
 class DocumentRename(BaseModel):
     title: str

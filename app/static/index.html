@@ -114,15 +114,6 @@
     display: flex; flex-wrap: wrap; gap: 0.45rem; justify-content: center;
     margin-top: 1.1rem;
   }
-  .topic-chip {
-    font-size: 0.75rem; font-weight: 600; color: var(--ink-soft);
-    background: var(--card); border: 1px solid var(--line);
-    padding: 0.28rem 0.7rem; border-radius: 999px; cursor: pointer;
-    font-family: var(--font); margin: 0;
-  }
-  .topic-chip:hover, .topic-chip.active {
-    color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
-  }
   .pill {
     font-size: 0.75rem; font-weight: 600; color: var(--accent);
     background: var(--accent-soft); border: 1px solid transparent;
@@ -653,7 +644,6 @@
           <input type="text" id="topic" placeholder="e.g. cryptography, IPSec, ethical hacking" />
         </div>
       </div>
-      <div id="topic-chips" class="pill-row" style="justify-content:flex-start;margin-top:0.45rem" aria-label="Suggested topics"></div>
 
       <div class="row" id="exam-fields">
         <div>
@@ -1103,44 +1093,11 @@ async function refreshDocumentList(selectId) {
   } catch (_) { /* ignore */ }
 }
 
-async function loadTopicChips(documentId) {
-  const holder = $("topic-chips");
-  if (!holder) return;
-  holder.innerHTML = "";
-  if (!documentId) return;
-  try {
-    const data = await api(`/api/documents/${encodeURIComponent(documentId)}/topics`);
-    (data.topics || []).forEach((t) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "topic-chip";
-      btn.textContent = t.topic;
-      const srcTips = {
-        heading: "Markdown heading",
-        bold: "Bold heading line",
-        chapter: "Chapter / section label",
-        numbered: "Numbered outline heading",
-        caps: "ALL-CAPS heading",
-        title_case: "Title-style heading line",
-        standalone: "Standalone heading explained below",
-      };
-      btn.title = srcTips[t.source] || "Heading from your notes";
-      btn.onclick = () => {
-        $("topic").value = t.topic;
-        holder.querySelectorAll(".topic-chip").forEach((c) => c.classList.remove("active"));
-        btn.classList.add("active");
-      };
-      holder.appendChild(btn);
-    });
-  } catch (_) { /* optional */ }
-}
-
 function selectDocument(id, title, detail) {
   docId = id;
   $("upload-status").className = "status";
   $("upload-status").textContent = detail || `Using saved document "${title}".`;
   $("options-card").classList.remove("hidden");
-  loadTopicChips(id);
 }
 
 refreshDocumentList();
