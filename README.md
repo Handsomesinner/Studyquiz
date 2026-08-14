@@ -79,10 +79,11 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
 or any text-based file, **up to 100 MB**), choose the number of questions,
-difficulty, optional focus topic and exam timer, and take the quiz. The UI
-shows answer progress, warns on unanswered items, supports **review wrong
-only**, and **print / save PDF**. Saved documents reappear in the dropdown
-after a restart.
+difficulty, optional focus topic (with **auto-suggested chips** from headings
+and frequent phrases), and take the quiz. MCQ generation **retries ungrounded
+items only**, drops **near-duplicates**, and can use **harder distractors**.
+Merge several uploads into a **course pack** for semester-wide practice.
+The UI shows answer progress, weak-area re-quiz, and **print / save PDF**.
 
 ### Upload size (important)
 

@@ -371,6 +371,89 @@ def list_documents():
     return store.list_documents()
 
 
+@app.get("/api/documents/{doc_id}/topics")
+def document_topics(doc_id: str, limit: int = 16):
+    """Suggest focus topics from headings and frequent phrases in the notes."""
+    from . import topics as topics_mod
+
+    doc = store.get_document(doc_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found.")
+    text = doc.get("text") or "\n\n".join(doc.get("chunks") or [])
+    items = topics_mod.topic_map(text, max_topics=limit)
+    return {
+        "document_id": doc_id,
+        "title": doc.get("title"),
+        "topics": items,
+    }
+
+
+class MergeDocumentsRequest(BaseModel):
+    document_ids: list[str]
+    title: str | None = None
+
+
+@app.post("/api/documents/merge")
+def merge_documents(req: MergeDocumentsRequest):
+    """Merge several indexed documents into one course-pack index (new id)."""
+    ids = [str(i).strip() for i in (req.document_ids or []) if str(i).strip()]
+    # de-dupe preserve order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for i in ids:
+        if i in seen:
+            continue
+        seen.add(i)
+        uniq.append(i)
+    if len(uniq) < 2:
+        raise HTTPException(400, "Select at least two documents to merge.")
+    if len(uniq) > 12:
+        raise HTTPException(400, "Merge at most 12 documents at a time.")
+
+    parts_text: list[str] = []
+    titles: list[str] = []
+    for did in uniq:
+        d = store.get_document(did)
+        if d is None:
+            raise HTTPException(404, f"Document not found: {did}")
+        titles.append(d.get("title") or did)
+        body = d.get("text") or "\n\n".join(d.get("chunks") or [])
+        parts_text.append(f"===== {d.get('title') or did} =====\n\n{body}")
+
+    combined = "\n\n".join(parts_text)
+    if len(combined) > MAX_EXTRACTED_CHARS:
+        raise HTTPException(
+            413,
+            "Merged text is too large for this deployment. "
+            "Merge fewer files or shorter notes.",
+        )
+    chunks = pdf_processor.chunk_text(combined)
+    if not chunks:
+        raise HTTPException(400, "Merged pack has no extractable text.")
+
+    pack_id = uuid.uuid4().hex[:12]
+    title = (req.title or "").strip() or (
+        "Course pack: " + ", ".join(titles[:4]) + ("…" if len(titles) > 4 else "")
+    )
+    if len(title) > 200:
+        title = title[:197] + "…"
+    store.save_document(
+        doc_id=pack_id,
+        title=title,
+        text=combined,
+        chunks=chunks,
+    )
+    return {
+        "id": pack_id,
+        "title": title,
+        "num_chunks": len(chunks),
+        "num_words": len(combined.split()),
+        "source_ids": uniq,
+        "source_titles": titles,
+        "merged": True,
+    }
+
+
 class DocumentRename(BaseModel):
     title: str
 
@@ -454,6 +537,7 @@ class QuizRequest(BaseModel):
     # Evaluation metrics still record the full pre-filter generation.
     require_grounding: bool = True
     difficulty: str = "medium"  # easy | medium | hard
+    harder_distractors: bool = False  # closer wrong options
 
 
 def _build_eval_rows(
@@ -503,6 +587,7 @@ def _generate_mcq_attempt(
     use_rag: bool,
     difficulty: str,
     source_text: str,
+    harder_distractors: bool = False,
 ):
     """One generation + grounding pass. Raises GenerationError on API failure."""
     quiz = generator.generate_quiz_from_batches(
@@ -513,6 +598,7 @@ def _generate_mcq_attempt(
         topic=topic,
         use_rag=use_rag,
         difficulty=difficulty,
+        harder_distractors=harder_distractors,
     )
     pre_groundings, pre_metrics = grounding.validate_quiz(
         quiz.questions,
@@ -524,6 +610,8 @@ def _generate_mcq_attempt(
 
 @app.post("/api/quiz")
 def create_quiz(req: QuizRequest):
+    from . import quality
+
     doc = store.get_document(req.document_id)
     if doc is None:
         raise HTTPException(404, "Document not found. Upload it again.")
@@ -553,6 +641,7 @@ def create_quiz(req: QuizRequest):
             use_rag=req.use_rag,
             difficulty=req.difficulty,
             source_text=source_text,
+            harder_distractors=req.harder_distractors,
         )
     except generator.GenerationError as e:
         raise HTTPException(503, str(e))
@@ -563,6 +652,85 @@ def create_quiz(req: QuizRequest):
             "The model returned no questions. Try again or use a longer document.",
         )
 
+    # Near-duplicate filter on full model output before grounding serve policy.
+    deduped_q, deduped_g, duplicates_dropped = quality.filter_near_duplicates(
+        quiz.questions, pre_groundings
+    )
+    if deduped_q:
+        quiz.questions = deduped_q
+        if deduped_g is not None:
+            pre_groundings = deduped_g
+            pre_metrics = grounding.summarise(pre_groundings, use_rag=req.use_rag)
+
+    # Retry only ungrounded items (not the whole quiz) when require_grounding.
+    partial_retries = 0
+    if req.use_rag and req.require_grounding:
+        bad_idx = quality.ungrounded_indices(pre_groundings, use_rag=True)
+        if bad_idx and len(bad_idx) < len(quiz.questions):
+            n_retry = len(bad_idx)
+            try:
+                repl_quiz, repl_g, _ = _generate_mcq_attempt(
+                    doc=doc,
+                    num_questions=n_retry,
+                    plan=plan,
+                    context_batches=context_batches,
+                    topic=req.topic,
+                    use_rag=req.use_rag,
+                    difficulty=req.difficulty,
+                    source_text=source_text,
+                    harder_distractors=req.harder_distractors,
+                )
+                # Slot replacements into original positions when grounded
+                ri = 0
+                for bi in bad_idx:
+                    if ri >= len(repl_quiz.questions):
+                        break
+                    cand = repl_quiz.questions[ri]
+                    cg = repl_g[ri]
+                    ri += 1
+                    # Skip near-dup of any kept question
+                    if any(
+                        quality.is_near_duplicate(cand, kq)
+                        for j, kq in enumerate(quiz.questions)
+                        if j != bi
+                    ):
+                        continue
+                    if cg.grounded:
+                        quiz.questions[bi] = cand
+                        pre_groundings[bi] = cg
+                        partial_retries += 1
+                pre_metrics = grounding.summarise(
+                    pre_groundings, use_rag=req.use_rag
+                )
+            except generator.GenerationError:
+                pass
+        elif bad_idx and len(bad_idx) == len(quiz.questions):
+            # All ungrounded: one full regenerate (existing soft-fallback path)
+            try:
+                quiz2, pre2, metrics2 = _generate_mcq_attempt(
+                    doc=doc,
+                    num_questions=num_questions,
+                    plan=plan,
+                    context_batches=context_batches,
+                    topic=req.topic,
+                    use_rag=req.use_rag,
+                    difficulty=req.difficulty,
+                    source_text=source_text,
+                    harder_distractors=req.harder_distractors,
+                )
+                if quiz2.questions:
+                    dq, dg, dd = quality.filter_near_duplicates(
+                        quiz2.questions, pre2
+                    )
+                    if dq:
+                        quiz.questions = dq
+                        pre_groundings = dg if dg is not None else pre2
+                        pre_metrics = metrics2
+                        duplicates_dropped += dd
+                        partial_retries = len(dq)
+            except generator.GenerationError:
+                pass
+
     served_questions, served_groundings, filtered_out, best_effort = (
         grounding.resolve_grounded_serving(
             quiz.questions,
@@ -572,39 +740,8 @@ def create_quiz(req: QuizRequest):
         )
     )
 
-    retried = False
-    # If strict grounding wiped the whole set, auto-retry generation once.
-    if best_effort and req.use_rag and req.require_grounding:
-        try:
-            quiz2, pre2, metrics2 = _generate_mcq_attempt(
-                doc=doc,
-                num_questions=num_questions,
-                plan=plan,
-                context_batches=context_batches,
-                topic=req.topic,
-                use_rag=req.use_rag,
-                difficulty=req.difficulty,
-                source_text=source_text,
-            )
-            if quiz2.questions:
-                retried = True
-                s2, g2, f2, be2 = grounding.resolve_grounded_serving(
-                    quiz2.questions,
-                    pre2,
-                    use_rag=req.use_rag,
-                    require_grounding=req.require_grounding,
-                )
-                # Prefer any attempt that has verified questions; else keep retry output.
-                quiz, pre_groundings, pre_metrics = quiz2, pre2, metrics2
-                served_questions, served_groundings, filtered_out, best_effort = (
-                    s2,
-                    g2,
-                    f2,
-                    be2,
-                )
-        except generator.GenerationError:
-            # Keep first attempt (best-effort) rather than failing the student.
-            pass
+    # If filter emptied after partial work, soft best-effort already handled
+    retried = partial_retries > 0
 
     post_metrics = grounding.summarise(served_groundings, use_rag=req.use_rag)
 
@@ -615,10 +752,17 @@ def create_quiz(req: QuizRequest):
         warning = (
             "Could not verify source quotes for these questions"
             f" ({grounded_n}/{total} matched the notes)"
-            + (" after one automatic retry. " if retried else ". ")
+            + (" after retrying ungrounded items. " if retried else ". ")
             + "Serving best-effort questions — answers may be less tightly grounded. "
             "You can generate again or turn off “Only keep questions verified against the notes”."
         )
+    elif duplicates_dropped or partial_retries:
+        bits = []
+        if duplicates_dropped:
+            bits.append(f"removed {duplicates_dropped} near-duplicate(s)")
+        if partial_retries:
+            bits.append(f"replaced {partial_retries} ungrounded item(s)")
+        warning = "Quality pass: " + "; ".join(bits) + "."
 
     quiz_id = uuid.uuid4().hex[:12]
     store.save_quiz(
@@ -673,8 +817,11 @@ def create_quiz(req: QuizRequest):
             "pre_filter": pre_metrics.to_dict(),
             "served": post_metrics.to_dict(),
             "retried": retried,
+            "partial_retries": partial_retries,
+            "duplicates_dropped": duplicates_dropped,
             "best_effort": best_effort,
             "warning": warning,
+            "harder_distractors": bool(req.harder_distractors),
         },
     }
 

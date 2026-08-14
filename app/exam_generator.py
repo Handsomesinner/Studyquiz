@@ -108,16 +108,20 @@ EXAM_SYSTEM_PROMPT = (
 
 EXAM_DIFFICULTY = {
     "easy": (
-        "Difficulty EASY: Define / List / State / Briefly explain. "
-        "About 4–5 parts; marks mostly 2–5."
+        "Difficulty EASY — Bloom: remember/understand. "
+        "Prefer verbs: Define, List, State, Identify, Briefly explain. "
+        "About 4–5 parts; marks mostly 2–5. Avoid evaluate/critique."
     ),
     "medium": (
-        "Difficulty MEDIUM: Discuss / Explain with examples. "
-        "About 4–6 parts; marks 3–6."
+        "Difficulty MEDIUM — Bloom: apply/analyse. "
+        "Prefer verbs: Explain, Describe, Apply, Compare, Distinguish, Illustrate. "
+        "About 4–6 parts; marks 3–6. Mix recall with application."
     ),
     "hard": (
-        "Difficulty HARD: deeper Discuss / Compare / Critically examine. "
-        "About 5–6 parts; marks 4–8; use roman lists where useful."
+        "Difficulty HARD — Bloom: evaluate/create. "
+        "Prefer verbs: Evaluate, Critically examine, Justify, Design, Argue, "
+        "Assess, Synthesise. About 5–6 parts; marks 4–8; use roman lists where useful. "
+        "Require judgment or multi-step reasoning grounded in the material."
     ),
 }
 

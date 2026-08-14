@@ -60,18 +60,27 @@ DIFFICULTY_GUIDANCE = {
     "easy": (
         "Difficulty: EASY. Prefer straightforward recall of definitions, "
         "basic facts, and direct statements from the material. Avoid trick "
-        "questions; keep distractors clearly wrong once the fact is known."
+        "questions; keep distractors clearly wrong once the fact is known. "
+        "Bloom verbs: define, list, state, identify, name."
     ),
     "medium": (
         "Difficulty: MEDIUM. Mix recall with light application or comparison. "
-        "Distractors should be plausible misconceptions, not obviously absurd."
+        "Distractors should be plausible misconceptions, not obviously absurd. "
+        "Bloom verbs: explain, describe, apply, classify, compare."
     ),
     "hard": (
         "Difficulty: HARD. Prefer higher-order items: multi-step reasoning, "
         "compare/contrast, edge cases, or subtle distinctions between options. "
-        "Still stay answerable from the material when RAG is on."
+        "Still stay answerable from the material when RAG is on. "
+        "Bloom verbs: evaluate, analyse, justify, critique, design."
     ),
 }
+
+HARDER_DISTRACTORS_GUIDANCE = (
+    "Harder wrong options: make distractors close to the correct answer "
+    "(partial truths, swapped terms, off-by-one facts, related-but-wrong concepts). "
+    "Avoid silly or obviously unrelated choices. Only one option must still be fully correct."
+)
 
 
 def _normalize_difficulty(difficulty: str | None) -> str:
@@ -88,6 +97,7 @@ def _one_shot_generate(
     use_rag: bool,
     section_label: str | None = None,
     difficulty: str = "medium",
+    harder_distractors: bool = False,
 ) -> Quiz:
     if use_rag:
         sources = "\n\n".join(
@@ -121,6 +131,8 @@ def _one_shot_generate(
         task += f"\n\nFocus the questions on this topic: {topic}"
 
     task += "\n\n" + DIFFICULTY_GUIDANCE[_normalize_difficulty(difficulty)]
+    if harder_distractors:
+        task += "\n\n" + HARDER_DISTRACTORS_GUIDANCE
 
     import anthropic
 
@@ -164,6 +176,7 @@ def generate_quiz(
     topic: str | None,
     use_rag: bool,
     difficulty: str = "medium",
+    harder_distractors: bool = False,
 ) -> Quiz:
     """Generate a quiz from a single context window (legacy / simple path)."""
     return _one_shot_generate(
@@ -173,6 +186,7 @@ def generate_quiz(
         topic=topic,
         use_rag=use_rag,
         difficulty=difficulty,
+        harder_distractors=harder_distractors,
     )
 
 
@@ -185,6 +199,7 @@ def generate_quiz_from_batches(
     topic: str | None,
     use_rag: bool,
     difficulty: str = "medium",
+    harder_distractors: bool = False,
 ) -> Quiz:
     """Generate questions section-by-section then merge (long-document path).
 
@@ -199,6 +214,7 @@ def generate_quiz_from_batches(
             topic=topic,
             use_rag=False,
             difficulty=difficulty,
+            harder_distractors=harder_distractors,
         )
 
     if not context_batches:
@@ -213,6 +229,7 @@ def generate_quiz_from_batches(
             topic=topic,
             use_rag=True,
             difficulty=difficulty,
+            harder_distractors=harder_distractors,
         )
 
     collected: list[QuizQuestion] = []
@@ -229,6 +246,7 @@ def generate_quiz_from_batches(
             use_rag=True,
             section_label=label,
             difficulty=difficulty,
+            harder_distractors=harder_distractors,
         )
         collected.extend(part.questions)
 

@@ -114,6 +114,15 @@
     display: flex; flex-wrap: wrap; gap: 0.45rem; justify-content: center;
     margin-top: 1.1rem;
   }
+  .topic-chip {
+    font-size: 0.75rem; font-weight: 600; color: var(--ink-soft);
+    background: var(--card); border: 1px solid var(--line);
+    padding: 0.28rem 0.7rem; border-radius: 999px; cursor: pointer;
+    font-family: var(--font); margin: 0;
+  }
+  .topic-chip:hover, .topic-chip.active {
+    color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
+  }
   .pill {
     font-size: 0.75rem; font-weight: 600; color: var(--accent);
     background: var(--accent-soft); border: 1px solid transparent;
@@ -619,6 +628,14 @@
         <button class="secondary" id="replace-doc-btn" type="button">Replace file</button>
         <button class="secondary danger-btn" id="delete-doc-btn" type="button">Delete</button>
       </div>
+      <div style="margin-top:0.85rem">
+        <label class="field-label" for="merge-docs">Course pack — merge several notes</label>
+        <select id="merge-docs" multiple size="4" style="width:100%;min-height:5.5rem"></select>
+        <p class="hint" style="margin-top:0.3rem">Hold Ctrl/Cmd to select 2+ documents, then merge into one index for a full semester pack.</p>
+        <div class="btn-row">
+          <button class="secondary" type="button" id="merge-docs-btn">Merge into course pack</button>
+        </div>
+      </div>
       <input type="file" id="replace-file" class="hidden" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
     </div>
     <div class="status" id="upload-status" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -644,6 +661,7 @@
           <input type="text" id="topic" placeholder="e.g. cryptography, IPSec, ethical hacking" />
         </div>
       </div>
+      <div id="topic-chips" class="pill-row" style="justify-content:flex-start;margin-top:0.45rem" aria-label="Suggested topics"></div>
 
       <div class="row" id="exam-fields">
         <div>
@@ -660,9 +678,9 @@
         <div>
           <label class="field-label" for="difficulty">Difficulty</label>
           <select id="difficulty">
-            <option value="easy">Easy — build confidence</option>
-            <option value="medium" selected>Medium — solid practice</option>
-            <option value="hard">Hard — exam stretch</option>
+            <option value="easy">Easy — define / list / recall</option>
+            <option value="medium" selected>Medium — explain / apply</option>
+            <option value="hard">Hard — evaluate / analyse</option>
           </select>
         </div>
         <div id="timer-field">
@@ -689,6 +707,10 @@
       <div class="toggle" id="grounding-toggle">
         <input type="checkbox" id="require-grounding" checked />
         <label for="require-grounding">Only keep questions verified against the notes</label>
+      </div>
+      <div class="toggle" id="harder-options-toggle">
+        <input type="checkbox" id="harder-distractors" />
+        <label for="harder-distractors">Harder wrong options (closer distractors)</label>
       </div>
       <div class="toggle" id="weak-toggle">
         <input type="checkbox" id="focus-weak" />
@@ -1086,7 +1108,43 @@ async function refreshDocumentList(selectId) {
     });
     if (prev) sel.value = prev;
     $("previous-docs").classList.toggle("hidden", docs.length === 0);
+    // Multi-select for course pack merge
+    const merge = $("merge-docs");
+    if (merge) {
+      const selected = new Set(Array.from(merge.selectedOptions || []).map((o) => o.value));
+      merge.innerHTML = "";
+      docs.forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = `${d.title} (${d.num_chunks} chunks)`;
+        if (selected.has(d.id)) opt.selected = true;
+        merge.appendChild(opt);
+      });
+    }
   } catch (_) { /* ignore */ }
+}
+
+async function loadTopicChips(documentId) {
+  const holder = $("topic-chips");
+  if (!holder) return;
+  holder.innerHTML = "";
+  if (!documentId) return;
+  try {
+    const data = await api(`/api/documents/${encodeURIComponent(documentId)}/topics`);
+    (data.topics || []).forEach((t) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "topic-chip";
+      btn.textContent = t.topic;
+      btn.title = t.source === "heading" ? "From a heading in your notes" : "Frequent phrase in your notes";
+      btn.onclick = () => {
+        $("topic").value = t.topic;
+        holder.querySelectorAll(".topic-chip").forEach((c) => c.classList.remove("active"));
+        btn.classList.add("active");
+      };
+      holder.appendChild(btn);
+    });
+  } catch (_) { /* optional */ }
 }
 
 function selectDocument(id, title, detail) {
@@ -1094,6 +1152,7 @@ function selectDocument(id, title, detail) {
   $("upload-status").className = "status";
   $("upload-status").textContent = detail || `Using saved document "${title}".`;
   $("options-card").classList.remove("hidden");
+  loadTopicChips(id);
 }
 
 refreshDocumentList();
@@ -1844,6 +1903,7 @@ async function generateMcq() {
         use_rag: $("use-rag").checked,
         require_grounding: $("use-rag").checked && $("require-grounding").checked,
         difficulty: $("difficulty").value || "medium",
+        harder_distractors: !!( $("harder-distractors") && $("harder-distractors").checked ),
       }),
     });
     quizId = quiz.quiz_id;
@@ -2721,6 +2781,54 @@ const _selectDocument = selectDocument;
 selectDocument = function(id, title, detail) {
   _selectDocument(id, title, detail);
   refreshDueHint();
+};
+
+if ($("merge-docs-btn")) {
+  $("merge-docs-btn").onclick = async () => {
+    const merge = $("merge-docs");
+    const status = $("upload-status");
+    const ids = Array.from(merge.selectedOptions || []).map((o) => o.value).filter(Boolean);
+    if (ids.length < 2) {
+      status.textContent = "Select at least two documents to merge.";
+      status.className = "status error";
+      return;
+    }
+    const title = window.prompt(
+      "Name for this course pack:",
+      "Course pack (" + ids.length + " files)"
+    );
+    if (title === null) return;
+    $("merge-docs-btn").disabled = true;
+    status.className = "status";
+    status.textContent = "Merging into one searchable pack…";
+    try {
+      const pack = await api("/api/documents/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_ids: ids, title: title || null }),
+      });
+      selectDocument(
+        pack.id,
+        pack.title,
+        `Course pack ready: “${pack.title}” — ${pack.num_words.toLocaleString()} words in ${pack.num_chunks} chunks (from ${pack.source_ids.length} files).`
+      );
+      await refreshDocumentList(pack.id);
+    } catch (e) {
+      status.textContent = e.message;
+      status.className = "status error";
+    } finally {
+      $("merge-docs-btn").disabled = false;
+    }
+  };
+}
+
+// Hide harder-distractors on exam mode
+const _setModeQuality = setMode;
+setMode = function(mode) {
+  _setModeQuality(mode);
+  if ($("harder-options-toggle")) {
+    $("harder-options-toggle").classList.toggle("hidden", appMode !== "mcq");
+  }
 };
 
 </script>
