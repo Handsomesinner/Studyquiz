@@ -1210,24 +1210,51 @@ const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 // Vercel serverless body is ~4.5 MB — above this we use Blob client upload.
 const BLOB_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
 
+/** Guess a MIME type Vercel Blob will accept (Safari often sends empty type). */
+function guessContentType(file) {
+  const t = (file && file.type) || "";
+  if (t && t !== "application/octet-stream") return t;
+  const name = ((file && file.name) || "").toLowerCase();
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".docx"))
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (name.endsWith(".pptx"))
+    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  if (name.endsWith(".doc")) return "application/msword";
+  if (name.endsWith(".txt") || name.endsWith(".md")) return "text/plain";
+  return "application/octet-stream";
+}
+
+/** Safe Blob pathname (no spaces / odd chars that break PUT). */
+function safeBlobPathname(filename) {
+  const raw = (filename || "upload.bin").replace(/\\/g, "/").split("/").pop() || "upload.bin";
+  const safe = raw.replace(/[^\w.\-()+]+/g, "_").replace(/_+/g, "_");
+  return `uploads/${Date.now()}-${safe}`;
+}
+
 /**
  * Native Blob client upload (no esm.sh SDK).
  * Safari was stuck at 0% with the CDN @vercel/blob client after token OK.
  *
  * Flow: POST /api/blob/upload → clientToken → XHR PUT blob.vercel-storage.com
- * Returns { url, filename } for the stored object (notes or questions file).
+ * Requires x-api-version 12 + x-vercel-blob-access (public|private).
  */
 async function putFileToBlob(file, statusEl, label) {
   const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-  const pathname = (file.name || "upload.bin").replace(/\\/g, "/");
+  const pathname = safeBlobPathname(file.name);
+  const contentType = guessContentType(file);
   const handleUploadUrl = new URL("/api/blob/upload", window.location.href).href;
   const what = label || "file";
 
   statusEl.textContent = `Preparing ${what} "${file.name}" (${sizeMb} MB)…`;
 
+  const tokenHeaders = { "content-type": "application/json" };
+  const pin = getAccessPin();
+  if (pin) tokenHeaders["X-StudyQuiz-Pin"] = pin;
+
   const tokenRes = await fetch(handleUploadUrl, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: tokenHeaders,
     body: JSON.stringify({
       type: "blob.generate-client-token",
       payload: {
@@ -1259,6 +1286,12 @@ async function putFileToBlob(file, statusEl, label) {
     );
   }
 
+  // Must match the Blob store type or Vercel returns "This blob type is not supported".
+  const access =
+    (tokenJson.access === "private" || tokenJson.access === "public")
+      ? tokenJson.access
+      : "public";
+
   statusEl.textContent = `Uploading ${what}… 0%`;
 
   const putResult = await new Promise((resolve, reject) => {
@@ -1267,11 +1300,9 @@ async function putFileToBlob(file, statusEl, label) {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", putUrl);
     xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
-    xhr.setRequestHeader("x-api-version", "9");
-    xhr.setRequestHeader(
-      "x-content-type",
-      file.type || "application/octet-stream"
-    );
+    xhr.setRequestHeader("x-api-version", "12");
+    xhr.setRequestHeader("x-vercel-blob-access", access);
+    xhr.setRequestHeader("x-content-type", contentType);
     xhr.setRequestHeader("x-content-length", String(file.size));
 
     xhr.upload.onprogress = (event) => {
@@ -1293,13 +1324,23 @@ async function putFileToBlob(file, statusEl, label) {
         }
         return;
       }
-      const snippet = (xhr.responseText || "").slice(0, 300);
-      reject(
-        new Error(
-          `Blob storage PUT failed (HTTP ${xhr.status}). ${snippet || "No body."} ` +
-            "Confirm the store is Public and BLOB_READ_WRITE_TOKEN matches this project."
-        )
-      );
+      let snippet = (xhr.responseText || "").slice(0, 400);
+      try {
+        const err = JSON.parse(xhr.responseText || "{}");
+        if (err.error && err.error.message) snippet = err.error.message;
+        else if (err.error) snippet = String(err.error);
+        else if (err.message) snippet = err.message;
+      } catch (_) { /* keep raw */ }
+      let hint =
+        `Blob storage PUT failed (HTTP ${xhr.status}). ${snippet || "No body."} `;
+      if (/blob type is not supported/i.test(snippet)) {
+        hint +=
+          "Your Blob store access mode may not match. " +
+          "If the store is Private, set BLOB_ACCESS=private on Vercel and redeploy; " +
+          "if Public, set BLOB_ACCESS=public (or leave unset). ";
+      }
+      hint += "Also confirm BLOB_READ_WRITE_TOKEN is set for this environment.";
+      reject(new Error(hint));
     };
 
     xhr.onerror = () =>
@@ -1324,7 +1365,11 @@ async function putFileToBlob(file, statusEl, label) {
 /** Notes: Blob PUT → index via /api/documents */
 async function uploadViaBlob(file, statusEl) {
   const { url, filename } = await putFileToBlob(file, statusEl, "notes");
-  statusEl.textContent = "Almost done — preparing your notes…";
+  const looksScan =
+    (filename || "").toLowerCase().endsWith(".pdf") && file.size > 1.5 * 1024 * 1024;
+  statusEl.textContent = looksScan
+    ? "Uploaded. Reading pages (scanned PDFs use OCR — this can take a minute)…"
+    : "Almost done — preparing your notes…";
   return api("/api/documents", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

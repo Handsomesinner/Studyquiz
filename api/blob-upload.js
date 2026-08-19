@@ -3,16 +3,21 @@
  *
  * Browser → Vercel Blob (not through Python body) → bypass ~4.5 MB limit.
  * Requires BLOB_READ_WRITE_TOKEN on the deployment.
+ *
+ * Set BLOB_ACCESS=private if your store is Private (default: public).
  */
 const { handleUpload } = require("@vercel/blob/client");
 
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+const BLOB_ACCESS =
+  (process.env.BLOB_ACCESS || "public").toLowerCase() === "private"
+    ? "private"
+    : "public";
 
 module.exports = async function handler(req, res) {
-  // CORS preflight (some browsers check before client-token POST)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-StudyQuiz-Pin");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -28,7 +33,7 @@ module.exports = async function handler(req, res) {
     return res.status(503).json({
       error:
         "BLOB_READ_WRITE_TOKEN is not set on this deployment. " +
-        "Add it under Vercel → Settings → Environment Variables (Production) and Redeploy.",
+        "Add it under Vercel → Settings → Environment Variables (Production + Preview) and Redeploy.",
     });
   }
 
@@ -48,17 +53,39 @@ module.exports = async function handler(req, res) {
     const jsonResponse = await handleUpload({
       body,
       request: req,
+      token,
       onBeforeGenerateToken: async (_pathname) => ({
-        // Do not restrict MIME types — Safari/macOS often send empty or odd types for PDFs.
+        // Allow PDFs and common note formats; empty MIME from Safari is ok
+        // because we also accept octet-stream.
+        allowedContentTypes: [
+          "application/pdf",
+          "application/octet-stream",
+          "application/msword",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "text/plain",
+          "text/markdown",
+          "text/*",
+        ],
         maximumSizeInBytes: MAX_BYTES,
         addRandomSuffix: true,
-        // Custom domain: ensure callback can reach production if needed
-        tokenPayload: JSON.stringify({ purpose: "studyquiz-document" }),
+        // Must match the store type (public vs private) or PUT returns
+        // "This blob type is not supported".
+        // Note: older handleUpload typed options may ignore unknown fields;
+        // access is enforced via the client PUT header x-vercel-blob-access.
+        tokenPayload: JSON.stringify({
+          purpose: "studyquiz-document",
+          access: BLOB_ACCESS,
+        }),
       }),
       onUploadCompleted: async ({ blob }) => {
         console.log("blob upload completed", blob && blob.url);
       },
     });
+    // Tell the browser which access mode to send on PUT.
+    if (jsonResponse && jsonResponse.type === "blob.generate-client-token") {
+      return res.status(200).json({ ...jsonResponse, access: BLOB_ACCESS });
+    }
     return res.status(200).json(jsonResponse);
   } catch (error) {
     console.error("blob-upload error", error);

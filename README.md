@@ -96,6 +96,11 @@ For large files on Vercel you **must** set `BLOB_READ_WRITE_TOKEN` (Storage → 
 in the Vercel dashboard). The UI uses client upload for files over ~3.5 MB so
 the file never goes through the Python function body.
 
+If Blob PUT fails with **“This blob type is not supported”**, match the store mode:
+set `BLOB_ACCESS=private` when the store is Private, or `BLOB_ACCESS=public` (default)
+when it is Public — then redeploy. Scanned/image PDFs also need `ANTHROPIC_API_KEY`
+so Claude OCR can extract text after upload.
+
 > **Deploy note — durable storage (Turso):** On Vercel, local SQLite can only
 > write to `/tmp` and **disappears on cold start**. For lasting documents and
 > quizzes, create a free [Turso](https://turso.tech) database and set:

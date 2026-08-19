@@ -155,9 +155,15 @@ def health():
         "detail": detail,
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+        "blob_access": (
+            "private"
+            if (os.getenv("BLOB_ACCESS") or "public").strip().lower() == "private"
+            else "public"
+        ),
         "auth_required": security.auth_required(),
         "upload_hint": (
-            "Use Vercel Blob client upload for files over ~4 MB on Vercel."
+            "Use Vercel Blob client upload for files over ~4 MB on Vercel. "
+            "Scanned PDFs need ANTHROPIC_API_KEY for OCR after upload."
             if store._running_serverless()
             else "Direct multipart upload is fine locally."
         ),
