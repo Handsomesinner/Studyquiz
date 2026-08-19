@@ -55,24 +55,10 @@ module.exports = async function handler(req, res) {
       request: req,
       token,
       onBeforeGenerateToken: async (_pathname) => ({
-        // Allow PDFs and common note formats; empty MIME from Safari is ok
-        // because we also accept octet-stream.
-        allowedContentTypes: [
-          "application/pdf",
-          "application/octet-stream",
-          "application/msword",
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          "text/plain",
-          "text/markdown",
-          "text/*",
-        ],
+        // Do not restrict MIME types — Safari often sends empty/odd types for PDFs.
+        // Restricting content types caused hard-to-debug 400s on real devices.
         maximumSizeInBytes: MAX_BYTES,
         addRandomSuffix: true,
-        // Must match the store type (public vs private) or PUT returns
-        // "This blob type is not supported".
-        // Note: older handleUpload typed options may ignore unknown fields;
-        // access is enforced via the client PUT header x-vercel-blob-access.
         tokenPayload: JSON.stringify({
           purpose: "studyquiz-document",
           access: BLOB_ACCESS,

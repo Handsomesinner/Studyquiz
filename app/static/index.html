@@ -948,11 +948,14 @@ async function api(path, options) {
   return body;
 }
 
-/** Discover whether the deploy requires a PIN (from health). */
+/** Discover PIN requirement + Blob access mode (from health). */
 async function loadAuthHint() {
   try {
     const h = await fetch("/api/health").then((r) => r.json());
     window.__sqAuthRequired = !!h.auth_required;
+    if (h.blob_access === "private" || h.blob_access === "public") {
+      rememberBlobAccess(h.blob_access);
+    }
   } catch (_) {
     window.__sqAuthRequired = false;
   }
@@ -1232,12 +1235,83 @@ function safeBlobPathname(filename) {
   return `uploads/${Date.now()}-${safe}`;
 }
 
+const BLOB_ACCESS_KEY = "sq-blob-access";
+
+function rememberedBlobAccess() {
+  try {
+    const v = sessionStorage.getItem(BLOB_ACCESS_KEY);
+    if (v === "private" || v === "public") return v;
+  } catch (_) {}
+  return null;
+}
+
+function rememberBlobAccess(access) {
+  try {
+    sessionStorage.setItem(BLOB_ACCESS_KEY, access);
+  } catch (_) {}
+}
+
+/** One PUT attempt with a specific public/private access mode. */
+function xhrPutToBlob(file, { pathname, contentType, clientToken, access, statusEl, label }) {
+  const what = label || "file";
+  return new Promise((resolve, reject) => {
+    const params = new URLSearchParams({ pathname });
+    const putUrl = `https://blob.vercel-storage.com/?${params.toString()}`;
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", putUrl);
+    xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
+    xhr.setRequestHeader("x-api-version", "12");
+    xhr.setRequestHeader("x-vercel-blob-access", access);
+    xhr.setRequestHeader("x-content-type", contentType);
+    xhr.setRequestHeader("x-content-length", String(file.size));
+
+    xhr.upload.onprogress = (event) => {
+      if (!statusEl) return;
+      if (event.lengthComputable && event.total > 0) {
+        const pct = Math.round((event.loaded / event.total) * 100);
+        statusEl.textContent = `Uploading ${what} (${access})… ${pct}%`;
+      } else if (event.loaded) {
+        const mb = (event.loaded / (1024 * 1024)).toFixed(1);
+        statusEl.textContent = `Uploading ${what}… ${mb} MB sent`;
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch (e) {
+          reject(new Error("Blob storage returned invalid JSON"));
+        }
+        return;
+      }
+      let snippet = (xhr.responseText || "").slice(0, 400);
+      try {
+        const err = JSON.parse(xhr.responseText || "{}");
+        if (err.error && err.error.message) snippet = err.error.message;
+        else if (typeof err.error === "string") snippet = err.error;
+        else if (err.message) snippet = err.message;
+      } catch (_) { /* keep raw */ }
+      const e = new Error(snippet || `HTTP ${xhr.status}`);
+      e.status = xhr.status;
+      e.snippet = snippet;
+      reject(e);
+    };
+
+    xhr.onerror = () =>
+      reject(new Error("Network error talking to blob.vercel-storage.com"));
+    xhr.ontimeout = () => reject(new Error("Blob upload timed out."));
+    xhr.timeout = 15 * 60 * 1000;
+    xhr.send(file);
+  });
+}
+
 /**
  * Native Blob client upload (no esm.sh SDK).
- * Safari was stuck at 0% with the CDN @vercel/blob client after token OK.
- *
  * Flow: POST /api/blob/upload → clientToken → XHR PUT blob.vercel-storage.com
- * Requires x-api-version 12 + x-vercel-blob-access (public|private).
+ *
+ * Auto-retries the opposite access mode (public↔private) when Vercel returns
+ * "This blob type is not supported" — that almost always means store mismatch.
  */
 async function putFileToBlob(file, statusEl, label) {
   const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
@@ -1286,80 +1360,51 @@ async function putFileToBlob(file, statusEl, label) {
     );
   }
 
-  // Must match the Blob store type or Vercel returns "This blob type is not supported".
-  const access =
-    (tokenJson.access === "private" || tokenJson.access === "public")
+  const preferred =
+    rememberedBlobAccess() ||
+    (tokenJson.access === "private" || tokenJson.access === "public"
       ? tokenJson.access
-      : "public";
+      : "public");
+  const fallback = preferred === "public" ? "private" : "public";
+  const order = [preferred, fallback];
 
-  statusEl.textContent = `Uploading ${what}… 0%`;
-
-  const putResult = await new Promise((resolve, reject) => {
-    const params = new URLSearchParams({ pathname });
-    const putUrl = `https://blob.vercel-storage.com/?${params.toString()}`;
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", putUrl);
-    xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
-    xhr.setRequestHeader("x-api-version", "12");
-    xhr.setRequestHeader("x-vercel-blob-access", access);
-    xhr.setRequestHeader("x-content-type", contentType);
-    xhr.setRequestHeader("x-content-length", String(file.size));
-
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && event.total > 0) {
-        const pct = Math.round((event.loaded / event.total) * 100);
-        statusEl.textContent = `Uploading ${what}… ${pct}%`;
-      } else if (event.loaded) {
-        const mb = (event.loaded / (1024 * 1024)).toFixed(1);
-        statusEl.textContent = `Uploading ${what}… ${mb} MB sent`;
+  let lastErr = null;
+  for (const access of order) {
+    try {
+      statusEl.textContent = `Uploading ${what}…`;
+      const putResult = await xhrPutToBlob(file, {
+        pathname,
+        contentType,
+        clientToken,
+        access,
+        statusEl,
+        label: what,
+      });
+      if (!putResult || !putResult.url) {
+        throw new Error("Blob upload finished but no file URL was returned.");
       }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          resolve(JSON.parse(xhr.responseText));
-        } catch (e) {
-          reject(new Error("Blob storage returned invalid JSON"));
-        }
-        return;
+      rememberBlobAccess(access);
+      return { url: putResult.url, filename: file.name || "upload.bin", access };
+    } catch (err) {
+      lastErr = err;
+      const msg = String((err && err.message) || err || "");
+      const typeMismatch = /blob type is not supported/i.test(msg);
+      if (typeMismatch && access === preferred) {
+        statusEl.textContent =
+          `Store looks ${fallback} — retrying upload as ${fallback}…`;
+        continue;
       }
-      let snippet = (xhr.responseText || "").slice(0, 400);
-      try {
-        const err = JSON.parse(xhr.responseText || "{}");
-        if (err.error && err.error.message) snippet = err.error.message;
-        else if (err.error) snippet = String(err.error);
-        else if (err.message) snippet = err.message;
-      } catch (_) { /* keep raw */ }
-      let hint =
-        `Blob storage PUT failed (HTTP ${xhr.status}). ${snippet || "No body."} `;
-      if (/blob type is not supported/i.test(snippet)) {
-        hint +=
-          "Your Blob store access mode may not match. " +
-          "If the store is Private, set BLOB_ACCESS=private on Vercel and redeploy; " +
-          "if Public, set BLOB_ACCESS=public (or leave unset). ";
-      }
-      hint += "Also confirm BLOB_READ_WRITE_TOKEN is set for this environment.";
-      reject(new Error(hint));
-    };
-
-    xhr.onerror = () =>
-      reject(
-        new Error(
-          "Network error talking to blob.vercel-storage.com (check Network tab)."
-        )
-      );
-    xhr.ontimeout = () => reject(new Error("Blob upload timed out."));
-    xhr.timeout = 15 * 60 * 1000; // 15 minutes for large files
-
-    xhr.send(file);
-  });
-
-  if (!putResult || !putResult.url) {
-    throw new Error("Blob upload finished but no file URL was returned.");
+      break;
+    }
   }
 
-  return { url: putResult.url, filename: file.name || "upload.bin" };
+  const msg = String((lastErr && lastErr.message) || lastErr || "upload failed");
+  throw new Error(
+    `Blob storage PUT failed. ${msg} ` +
+      "Tried both public and private access. " +
+      "On Vercel → Storage, check whether the Blob store is Public or Private, " +
+      "set BLOB_ACCESS to match, confirm BLOB_READ_WRITE_TOKEN for this environment, and Redeploy."
+  );
 }
 
 /** Notes: Blob PUT → index via /api/documents */
