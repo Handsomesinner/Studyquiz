@@ -111,6 +111,20 @@ def test_session_storage_contains_only_hashed_tokens(account_env):
     assert raw not in str(dict(row))
 
 
+def test_native_integration_uses_public_key_never_service_role(account_env,monkeypatch):
+    monkeypatch.delenv('STUDYQUIZ_AUTH_URL')
+    monkeypatch.delenv('STUDYQUIZ_AUTH_PUBLIC_KEY')
+    monkeypatch.setenv('NEXT_PUBLIC_SUPABASE_URL','https://synthetic.supabase.co')
+    monkeypatch.setenv('SUPABASE_SERVICE_ROLE_KEY','must-not-use-this')
+    monkeypatch.setenv('SUPABASE_PUBLISHABLE_KEY','synthetic-publishable')
+    assert accounts.configured()
+    assert accounts.public_key()=='synthetic-publishable'
+    monkeypatch.delenv('SUPABASE_PUBLISHABLE_KEY')
+    monkeypatch.delenv('SUPABASE_ANON_KEY',raising=False)
+    monkeypatch.delenv('NEXT_PUBLIC_SUPABASE_ANON_KEY',raising=False)
+    assert not accounts.configured()
+
+
 def test_dashboard_is_private_and_counts_all_attempts(account_env):
     alice,bob=TestClient(main.app),TestClient(main.app)
     sign_in(alice);upload(alice,'Alice notes')

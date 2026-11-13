@@ -29,7 +29,8 @@ def auth_url() -> str:
 
 
 def public_key() -> str:
-    return os.getenv("STUDYQUIZ_AUTH_PUBLIC_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") or ""
+    return (os.getenv("STUDYQUIZ_AUTH_PUBLIC_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+            or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY") or "")
 
 
 def configured() -> bool:

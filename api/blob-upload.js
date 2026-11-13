@@ -13,7 +13,7 @@ function validPin(headers) {
 
 function hasStudentSession(headers) {
   return !!(process.env.STUDYQUIZ_AUTH_URL || process.env.NEXT_PUBLIC_SUPABASE_URL) &&
-    !!(process.env.STUDYQUIZ_AUTH_PUBLIC_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) &&
+    !!(process.env.STUDYQUIZ_AUTH_PUBLIC_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY) &&
     /(?:^|;\s*)sq_student=[A-Za-z0-9_-]{43}(?:;|$)/.test(headers.cookie || '');
 }
 
