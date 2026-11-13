@@ -588,6 +588,16 @@
   </div>
 
 <main>
+  <section class="card hidden no-print" id="access-card" aria-labelledby="access-heading">
+    <h2 id="access-heading">Unlock your workspace</h2>
+    <p class="hint">Enter the access code set by the project owner. It stays in this browser tab only.</p>
+    <form id="access-form">
+      <label class="field-label" for="access-code">Access code</label>
+      <input id="access-code" type="password" autocomplete="current-password" required style="width:100%;margin-bottom:1rem" />
+      <button id="access-unlock" type="submit">Unlock workspace</button>
+      <p id="access-status" class="status" role="status" aria-live="polite"></p>
+    </form>
+  </section>
 
   <div id="setup-panel">
   <section class="card" id="upload-card">
@@ -906,17 +916,45 @@ function setAccessPin(pin) {
   } catch (_) { /* private mode */ }
 }
 
-function ensureAccessPinInteractive() {
-  let pin = getAccessPin();
-  if (pin) return pin;
-  pin = window.prompt(
-    "This deployment requires an access PIN (STUDYQUIZ_ACCESS_PIN).\nEnter PIN:"
-  );
-  if (pin == null || !String(pin).trim()) return "";
-  pin = String(pin).trim();
-  setAccessPin(pin);
-  return pin;
+function showAccessForm() {
+  const card = $("access-card");
+  card.classList.remove("hidden");
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  $("access-code").focus();
 }
+
+function ensureAccessPinInteractive() {
+  const pin = getAccessPin();
+  if (pin) return pin;
+  showAccessForm();
+  throw new Error("Enter your access code in Unlock your workspace, then try again.");
+}
+
+$("access-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const input = $("access-code");
+  const pin = input.value.trim();
+  const status = $("access-status");
+  if (!pin) { status.textContent = "Enter your access code."; return; }
+  $("access-unlock").disabled = true;
+  status.textContent = "Checking access…";
+  try {
+    await authReady;
+    // Validate before storing the secret; never put it in URLs or logs.
+    const response = await fetch("/api/documents", {headers: {"X-StudyQuiz-Pin": pin}});
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(response.status === 401 ? "That access code was not accepted. Please try again." : errorDetail(body, response.status));
+    setAccessPin(pin);
+    input.value = "";
+    status.textContent = "Workspace unlocked.";
+    $("access-card").classList.add("hidden");
+    await refreshDocumentList();
+  } catch (error) {
+    input.value = "";
+    status.textContent = error.message || "Could not unlock the workspace.";
+    input.focus();
+  } finally { $("access-unlock").disabled = false; }
+};
 
 async function api(path, options) {
   await authReady;
@@ -955,6 +993,7 @@ async function loadAuthHint() {
   try {
     const h = await fetch("/api/health").then((r) => r.json());
     window.__sqAuthRequired = !!h.auth_required;
+    if (h.auth_required && !getAccessPin() && !new URLSearchParams(location.search).has("share")) showAccessForm();
     window.__sqWorkspaceId = h.workspace_id;
     window.__sqServerless = !!h.serverless;
     if (h.blob_access === "private" || h.blob_access === "public") {
@@ -1318,8 +1357,8 @@ function xhrPutToBlob(file, { pathname, contentType, clientToken, access, status
  * Native Blob client upload (no esm.sh SDK).
  * Flow: POST /api/blob/upload → clientToken → XHR PUT blob.vercel-storage.com
  *
- * Auto-retries the opposite access mode (public↔private) when Vercel returns
- * "This blob type is not supported" — that almost always means store mismatch.
+ * Private access only; the inline access form handles credentials without
+ * relying on browser pop-up prompts.
  */
 async function putFileToBlob(file, statusEl, label) {
   await authReady;

@@ -50,7 +50,7 @@ configured. They no longer silently save work to disposable `/tmp` storage.
 
 | Setting | Purpose |
 |---|---|
-| `STUDYQUIZ_ACCESS_PIN` | Required access secret of at least 16 characters; UI prompts for it |
+| `STUDYQUIZ_ACCESS_PIN` | Required access secret of at least 16 characters; enter it in the inline Unlock workspace form |
 | `ANTHROPIC_API_KEY` | Claude generation/OCR |
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Durable shared database across workers |
 | `STUDYQUIZ_PRIVATE_BLOB_READ_WRITE_TOKEN` | Isolated token for this application's **private** Blob store; legacy `BLOB_READ_WRITE_TOKEN` is a fallback |
@@ -169,7 +169,7 @@ before submitting them. Do not treat old claims or metrics as validated results.
 ```sh
 python -m pytest tests -q
 npm ci --ignore-scripts
-node --test tests/blob-upload.test.cjs
+node --test tests/authentication.test.cjs tests/blob-upload.test.cjs
 ```
 
 Tests use isolated local databases, fake model responses and mocked upload
