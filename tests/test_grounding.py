@@ -95,7 +95,7 @@ def test_validate_baseline_empty_quote():
     g = validate_question(q, source_text=SOURCE, use_rag=False)
     assert g.grounded is False
     assert g.expected_grounded is False
-    assert g.match_type == "baseline_empty"
+    assert g.match_type == "empty_quote"
 
 
 def test_validate_quiz_metrics():
@@ -142,7 +142,7 @@ def test_resolve_grounded_serving_partial_filter():
     assert served_g[0].grounded is True
 
 
-def test_resolve_grounded_serving_soft_fallback_when_none_grounded():
+def test_resolve_grounded_serving_strict_failure_when_none_grounded():
     questions = [
         _q("Hallucinated one never in notes."),
         _q("Another invented claim about unicorns."),
@@ -155,11 +155,11 @@ def test_resolve_grounded_serving_soft_fallback_when_none_grounded():
         use_rag=True,
         require_grounding=True,
     )
-    # Soft fallback: still serve all questions, flag best_effort.
-    assert len(served_q) == 2
-    assert filtered == 0
-    assert best is True
-    assert len(served_g) == 2
+    # Strict means no unverified fallback.
+    assert served_q == []
+    assert filtered == 2
+    assert best is False
+    assert served_g == []
 
 
 def test_resolve_grounded_serving_report_only_keeps_all():

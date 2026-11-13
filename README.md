@@ -1,206 +1,180 @@
 # StudyQuiz — Retrieval-Augmented Question Generation from Lecture Materials
 
-Final year project — **Famule Oluwapamilerin Solomon (FTP/CSC/26/0133938)**, Department of Computer Science.
+Final year project — **Famule Oluwapamilerin Solomon**, Department of Computer Science.
 Supervisor: Dr. Aderibigbe.
 
-StudyQuiz is an AI study assistant that generates practice assessments from a
-student's own lecture PDFs. It uses **Retrieval-Augmented Generation (RAG)**: the
-relevant parts of the uploaded document are retrieved and given to a large
-language model (Claude), so every question is grounded in the actual course
-material instead of hallucinated. A built-in **baseline mode** generates
-questions *without* the retrieved context, which is used in the project's
-evaluation chapter to compare grounded vs ungrounded question quality.
+StudyQuiz creates practice quizzes, theory papers and answers from lecture notes.
+It retrieves relevant passages with BM25 and supplies them to Claude. RAG can
+help relevance; it does **not** guarantee correct questions or answers.
 
-### Practice modes
+## Practice modes
 
-| Mode | What you get | Scoring |
-|------|----------------|---------|
-| **MCQ Quiz** | Multiple-choice items with 4 options; weak-area re-quiz | Automatic |
-| **Exam Quiz** | Nigerian-style theory paper with in-browser writing + marking guides | Self-check (not auto-marked) |
-| **My questions** | Past papers from paste/upload; savable banks; answers from notes | Self-check |
+| Mode | Output | Assessment |
+|---|---|---|
+| MCQ quiz | Four-option questions; explanations after submission | Automatic comparison to the generated answer key |
+| Exam quiz | Theory paper, private writing draft and optional marking guides | Self-check, not automatic marking |
+| My questions | Answers to pasted/uploaded past questions; saved question banks | Self-check |
 
-**Share links:** after generate, copy `?quiz=` / `?exam=` (or create a `?share=` token). Classmates can take without re-uploading notes when storage is durable (Turso).
+This is a study tool, not a secure examination platform. Generated answer keys
+can be wrong. “Quote found” means quoted text occurs in the notes, not that the
+quote proves the answer.
 
-Exam Quiz mirrors written BSc papers (Discuss / Define / Explain with mark
-allocations), so students can prepare for exams the way lecturers actually set
-questions.
+## Local development
 
-## Architecture (maps to Chapter 3 of the report)
+Use **Python 3.12** and **Node 22** (Node is needed for the deployed upload handler
+and its tests). Local files use a persistent SQLite database at
+`data/studyquiz.db`; `STUDYQUIZ_DB` overrides the path.
 
-```
- ┌────────────┐   ┌──────────────────┐   ┌────────────────┐   ┌─────────────────┐
- │  Upload    │──▶│ (i) Extraction & │──▶│ (ii) Retrieval │──▶│ (iii) Question  │
- │  PDF/TXT   │   │     chunking     │   │  (BM25 index)  │   │  generation     │
- └────────────┘   │ pdf_processor.py │   │  retriever.py  │   │  (Claude API)   │
-                  └──────────────────┘   └────────────────┘   │  generator.py   │
-                                                              └────────┬────────┘
-                                          ┌────────────────┐           │
-                                          │ (iv) Web quiz  │◀──────────┘
-                                          │ UI + grading   │
-                                          │ main.py+static │
-                                          └────────────────┘
-```
-
-- **Extraction & chunking** — `pypdf` extracts text; a sliding word-window
-  (200 words, 40-word overlap) splits it into retrievable chunks.
-- **Retrieval** — the BM25 ranking function, implemented from scratch in
-  `app/retriever.py` so the mathematics can be presented in the report. The
-  class exposes the same interface an embedding + vector-database retriever
-  (e.g. ChromaDB) would, so that upgrade is a drop-in replacement.
-- **Coverage planning** — `coverage.py` scales how many chunks are retrieved
-  with document length and quiz size (not a fixed top_k=6), diversifies topic
-  hits so neighbouring windows are not over-sampled, and for long selections
-  **batches generation by section** so questions span the whole lecture.
-- **Generation** — Claude (`claude-haiku-4-5`) receives the retrieved chunks
-  and returns questions as **structured output** validated against a Pydantic
-  schema — guaranteed parseable JSON, each question carrying a supporting
-  quote from the source material.
-- **Grounding validation** — `grounding.py` checks each `source_quote` against
-  the full document text (exact + punctuation-normalised match). Questions
-  whose quote cannot be found are flagged; in default RAG mode they are
-  dropped so students only see verified items. The **quote-in-source rate**
-  is an automatic metric for the evaluation chapter (RAG vs baseline).
-- **Grading** — answers are kept server-side; the browser never sees the
-  correct option until the quiz is submitted.
-- **Persistence** — `store.py` saves documents, quizzes, attempt scores, and
-  evaluation rows. **Locally** it uses **SQLite** (`data/studyquiz.db`; override
-  with `STUDYQUIZ_DB`). **On Vercel**, set **Turso** (`TURSO_DATABASE_URL` +
-  `TURSO_AUTH_TOKEN`) so data survives cold starts; without Turso the app falls
-  back to ephemeral `/tmp` SQLite.
-
-## Running it
-
-```bash
-cd studyquiz
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...   # get one at https://platform.claude.com/
+```sh
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+# Set ANTHROPIC_API_KEY in your environment; never commit it.
 uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000 — upload lecture material (PDF, Word, PowerPoint,
-or any text-based file, **up to 100 MB**), choose the number of questions,
-difficulty, optional focus topic, and take the quiz. MCQ generation
-**retries ungrounded items only**, drops **near-duplicates**, and can use
-**harder distractors**. The UI shows answer progress, weak-area re-quiz, and
-**print / save PDF**.
+Open `http://127.0.0.1:8000`. Local browser uploads use multipart, including large
+files, without needing the Vercel Node route. Documents may be PDF, DOCX, PPTX or
+readable text. Maximum upload: 100 MB by default; PDFs are capped at 200 pages,
+extracted text at 5 million characters, and Office archive expansion is bounded.
+Scanned PDF OCR sends scanned pages to Anthropic and consumes the AI allowance.
 
-### Upload size (important)
+Local demos may run without a PIN. Set `STUDYQUIZ_ACCESS_PIN` to require one.
+`.env.example` lists settings, but the app does not automatically load `.env`.
+Load environment variables yourself; never share secret values in an issue.
 
-| Where | Practical max | How |
-|--------|----------------|-----|
-| **Local** (`uvicorn`) | **100 MB** | Direct multipart to `/api/documents` |
-| **Vercel (live)** | **~100 MB** | Browser → **Vercel Blob** → API indexes by URL |
-| **Vercel without Blob** | **~4.5 MB** | Serverless request body limit |
+## Public Vercel deployments
 
-For large files on Vercel you **must** set `BLOB_READ_WRITE_TOKEN` (Storage → Blob
-in the Vercel dashboard). The UI uses client upload for files over ~3.5 MB so
-the file never goes through the Python function body.
+Public deployments fail closed unless access protection and durable storage are
+configured. They no longer silently save work to disposable `/tmp` storage.
 
-If Blob PUT fails with **“This blob type is not supported”**, match the store mode:
-set `BLOB_ACCESS=private` when the store is Private, or `BLOB_ACCESS=public` (default)
-when it is Public — then redeploy. Scanned/image PDFs also need `ANTHROPIC_API_KEY`
-so Claude OCR can extract text after upload.
-
-> **Deploy note — durable storage (Turso):** On Vercel, local SQLite can only
-> write to `/tmp` and **disappears on cold start**. For lasting documents and
-> quizzes, create a free [Turso](https://turso.tech) database and set:
->
-> | Variable | Example |
-> |----------|---------|
-> | `TURSO_DATABASE_URL` | `libsql://studyquiz-yourorg.turso.io` |
-> | `TURSO_AUTH_TOKEN` | token from `turso db tokens create studyquiz` |
->
-> Schema is created automatically on first request (same tables as local SQLite).
-> Local `uvicorn` keeps using `data/studyquiz.db` unless Turso env vars are set.
->
-> **Access PIN (recommended on public deploys):** set `STUDYQUIZ_ACCESS_PIN` so
-> upload, generate, and evaluation routes require header `X-StudyQuiz-Pin`
-> (the UI prompts once per session). Leave unset for open local demos.
->
-> **Blob URL allowlist:** remote ingest only accepts Vercel Blob hosts
-> (`*.public.blob.vercel-storage.com`, `*.blob.vercel-storage.com`). Extra hosts
-> via `BLOB_ALLOWED_HOSTS` (comma-separated).
->
-> Health check: `GET /api/health` reports `storage_backend`, `storage_durable`,
-> `blob_configured`, `auth_required`, and `max_upload_mb`.
-
-## Evaluation mode (for the project write-up)
-
-Untick **"Ground questions in the document (RAG)"** in the UI to generate the
-plain-LLM baseline for the same document. Collect quizzes from both conditions
-and have raters score each question for *relevance*, *correctness*, and
-*answerability from the source* — that comparison is the research contribution.
-
-### Automatic metrics (no human raters required)
-
-After each quiz is generated, StudyQuiz records:
-
-| Metric | Meaning |
+| Setting | Purpose |
 |---|---|
-| **quote_in_source_rate** | Fraction of questions whose `source_quote` appears in the document |
-| **options_unique_rate** | Fraction of questions with four distinct options |
-| **match_type** | `exact` / `normalized` / `not_found` / `empty_quote` / `baseline_empty` |
+| `STUDYQUIZ_ACCESS_PIN` | Required access secret of at least 16 characters; UI prompts for it |
+| `ANTHROPIC_API_KEY` | Claude generation/OCR |
+| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Durable shared database across workers |
+| `BLOB_READ_WRITE_TOKEN` | Token for this application's **private** Blob store |
+| `BLOB_ACCESS=private` | Public upload mode is refused |
+| `AI_DAILY_GLOBAL_CALLS=100` | Deployment-wide maximum AI calls per UTC day |
+| `AI_DAILY_WORKSPACE_CALLS=30` | Maximum per browser workspace per UTC day |
+| `MAX_UPLOAD_MB=100` | Upload limit, capped at 100 MB |
+| `MAX_DOCUMENT_PAGES=200` | PDF page limit before extraction/OCR |
+| `MAX_EXTRACTED_CHARS=5000000` | Extracted text ceiling |
 
-Use these endpoints:
+Large live uploads go directly to private Blob storage. The separate Node route
+checks the PIN, then obtains a durable, workspace-bound upload permit before
+issuing a short-lived upload token. It calls the deployment's own
+`https://VERCEL_URL/api/blob/permit`; deployment protection must allow this
+server-to-server call. It never trusts a request's Host header for that URL.
+There is no public/private fallback. Both serverless runtimes must receive the
+same PIN and matching environment settings.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/quiz/{id}/evaluation` | Per-question grounding detail for one quiz |
-| `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline quote-in-source rates |
-| `GET` | `/api/evaluation/export` | Download all rows as **CSV** for tables/graphs |
+Uploaded URLs must belong to this store and an upload permit owned by the current
+workspace. Redirects to other stores, arbitrary download hosts, embedded URL
+credentials, and nonstandard ports are rejected. The store token is never sent
+to another store or a custom allowed host.
 
-Default RAG generation sets `require_grounding=true` (unverified questions are
-dropped when some still pass). If **every** quote fails, StudyQuiz **retries
-once**, then serves a **best-effort** quiz with a warning instead of a hard
-error. Untick the option to keep every model question and measure the raw
-failure rate — useful for ablation tables.
+AI budgets count individual calls, including batches, OCR and retries, with
+atomic durable counters. SDK automatic retries are disabled. They are call
+limits, **not a dollar-denominated billing cap**; also configure provider limits.
+A deployment gets at most 100 upload permits/day and a workspace 20/day.
+Failed/reserved attempts conservatively consume allowances.
 
-## Scope / limitations (as stated in the proposal)
+## Workspaces, sharing and privacy
 
-- PDF, Word, PowerPoint, plain text. **Scanned/image-only PDFs** use an optional
-  **Claude OCR fallback** when embedded text is empty (requires `ANTHROPIC_API_KEY`;
-  capped by `OCR_MAX_PAGES`, default 30). Handwriting quality varies.
-- Multiple-choice questions only; essay grading is out of scope.
-- Single-user store (no accounts yet); multi-user auth is future work.
-  On Vercel, configure Turso for durable multi-instance storage (see deploy note).
+Each browser receives an opaque HttpOnly, SameSite=Lax workspace cookie. Saved
+notes, quizzes, banks, drafts and evaluation data are scoped to its hashed ID.
+The PIN gates deployment access; it is **not** a personal login. Clearing cookies,
+using another browser, or changing domains does not recover the original
+workspace. A full account/recovery system is outside this change.
 
-## API
+Use the UI's **Copy link** buttons to create a scoped 7-day practice link.
+A bare `?quiz=` or `?exam=` ID does not grant another workspace access.
+Optional share passwords can be set through `POST /api/share`; they are salted
+PBKDF2 hashes and are submitted in a POST body, never a URL. Redeeming a share
+link creates a browser-bound grant to that single resource. Recipients have
+separate drafts and cannot change someone else's attempt or access the owner's
+notes, exports, or paid generation. `DELETE /api/share/{token}` revokes the link
+and its grants. Legacy unsalted/password links must be recreated.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/documents` | Upload and index a document |
-| `GET` | `/api/documents` | List indexed documents |
-| `PATCH` | `/api/documents/{id}` | Rename document (`{ "title" }`) |
-| `PUT` | `/api/documents/{id}` | Replace file / re-index (same id; multipart or Blob URL) |
-| `DELETE` | `/api/documents/{id}` | Delete document and linked quizzes / exams |
-| `POST` | `/api/quiz` | Generate MCQ quiz (`document_id`, `num_questions`, `topic?`, `use_rag`, `require_grounding`, `difficulty`) |
-| `POST` | `/api/quiz/{id}/submit` | Grade submitted MCQ answers |
-| `POST` | `/api/exam` | Generate theory **Exam Quiz** paper (`num_questions` major questions, `course_code`, `course_title`, …) |
-| `GET` | `/api/exam/{id}` | Fetch a saved exam paper |
-| `POST` | `/api/exam/{id}/answers` | After you attempt the paper: marking points + model-answer outlines from your notes |
-| `POST` | `/api/answer-from-notes` | Your own questions (paste and/or file; large files via Blob URL) → answers from notes |
-| `GET` | `/api/quiz/{id}/evaluation` | Grounding metrics + quotes for one quiz |
-| `GET` | `/api/evaluation/summary` | Aggregate RAG vs baseline rates |
-| `GET` | `/api/evaluation/export` | CSV export of all evaluation rows |
+Relevant note text, and scanned pages for OCR, are sent to Anthropic. The UI
+states this before upload. The app saves extracted text for study. Original Blob
+files are deleted after processing, including extraction failures. Failed
+cleanup stays in a durable queue, is retried on the next upload after one hour,
+and can be retried with `POST /api/uploads/cleanup`. Abandoned uploads are also
+covered by that queue. Operators should schedule regular cleanup if users may
+never return. No unattended cleanup schedule is created by this repository.
+
+If original-file deletion still cannot be confirmed, deleting its document
+returns a retryable error and retains the saved record so cleanup is not lost.
+Successful document deletion removes related evaluation runs/reviews and saved
+work. Previously uploaded public files are **not automatically discovered** by
+this upgrade: audit and remove them separately in the old Blob store.
+
+### Existing data upgrade
+
+Back up the database first. Existing records have no trustworthy owner, so they
+remain unclaimed rather than becoming visible to the next visitor. New tables
+are created additively; existing source rows are not erased by startup.
+
+1. Deploy with the required PIN/private storage/Turso settings on a preview.
+2. Open the app in the browser that should own the legacy data.
+3. Obtain its workspace ID from authenticated `GET /api/workspace`.
+4. Run the operator-only migration against the intended database, first as a dry
+   run, then with `--apply` after reviewing the counts:
+
+```sh
+python scripts/claim_legacy_workspace.py --workspace-id YOUR_64_CHARACTER_ID
+python scripts/claim_legacy_workspace.py --workspace-id YOUR_64_CHARACTER_ID --apply
+```
+
+It assigns only unclaimed records and never reassigns existing ownership. This
+operation is intended for the old single-user dataset. Do not assign a mixed
+multi-student dataset to one person. Recreate old share links after migration.
+Do not run this against production without a verified backup and intended owner.
+
+## Evaluation for the final-year report
+
+The baseline receives title/topic without retrieved text; its prompt does not
+request quotes. The validator now checks any supplied quote identically in both
+conditions; it no longer forces baseline scores to zero. Nevertheless, comparing
+quote rates is **not** an accuracy experiment because the prompts have different
+access to evidence. The summary labels this limitation explicitly.
+
+Strict quote mode returns an insufficient-evidence error when no question passes
+quote and option checks. It never silently serves unverified questions. Users
+may explicitly disable the filter. Duplicate options are rejected by the strict
+filter. All MCQ attempts/retries, including all-failed runs, are retained
+separately from served output, with elapsed time and status. Original pre-filter
+rows are preserved before duplicate removal/replacement; served rows are a
+separate phase. Old records are not retroactively re-evaluated.
+
+For correctness, use the same independent human rubric in both conditions:
+
+- Is the marked answer correct?
+- Does the evidence actually support it?
+- Is the question clear and unambiguous?
+
+`PUT /api/quiz/{id}/reviews/{index}` records those three Boolean judgements plus
+optional notes. Unreviewed accuracy remains null, not zero or “verified.”
+`GET /api/evaluation/summary` reports human-review counts and rates separately
+from quote provenance. The CSV includes review fields on served questions and
+neutralizes spreadsheet formula prefixes. [Evaluation protocol](docs/evaluation-protocol.md)
+describes a fair experiment. Existing defense DOCX files are historical drafts;
+update the generator/report to match this implementation and actual results
+before submitting them. Do not treat old claims or metrics as validated results.
 
 ## Tests
 
-```bash
-pip install -r requirements.txt
-python -m pytest tests/ -q
+```sh
+python -m pytest tests -q
+npm ci --ignore-scripts
+node --test tests/blob-upload.test.cjs
 ```
 
-Grounding tests do **not** call the Claude API.
-
-## Project defense report
-
-A full viva/defense write-up is in:
-
-- [`docs/StudyQuiz_Project_Defense_Report.docx`](docs/StudyQuiz_Project_Defense_Report.docx)
-
-Regenerate after doc changes:
-
-```bash
-npm install   # once — installs `docx`
-node docs/generate_defense_report.js
-```
+Tests use isolated local databases, fake model responses and mocked upload
+services. They do not make real uploads or paid AI calls. Use Python 3.12
+and Node 22 for automated checks. GitHub workflow setup is separate because
+the connected OAuth app cannot create workflow files. Live private-store and
+Turso configuration still require a preview smoke test using operator-controlled
+test data.

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import re
+import os
+import zipfile
 
 from pypdf import PdfReader
 
@@ -31,7 +33,17 @@ def _extract_pdf_embedded(data: bytes) -> tuple[str, int]:
     """Return (embedded_text, page_count) without OCR."""
     reader = PdfReader(io.BytesIO(data))
     page_count = len(reader.pages)
-    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    if page_count > int(os.getenv("MAX_DOCUMENT_PAGES", "200")):
+        raise ValueError("Document has too many pages (maximum 200 by default).")
+    pieces = []
+    chars = 0
+    for page in reader.pages:
+        piece = page.extract_text() or ""
+        chars += len(piece)
+        if chars > int(os.getenv("MAX_EXTRACTED_CHARS", "5000000")):
+            raise ValueError("Extracted document text is too large.")
+        pieces.append(piece)
+    text = "\n".join(pieces)
     return text, page_count
 
 
@@ -118,6 +130,16 @@ def extract_text_with_meta(filename: str, data: bytes) -> tuple[str, bool]:
     """Like extract_text, but also returns whether OCR was used."""
     name = (filename or "upload.bin").lower()
     ocr_used = False
+    if name.endswith((".docx", ".pptx")):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                entries = archive.infolist()
+                if len(entries) > 5000 or sum(i.file_size for i in entries) > 50 * 1024 * 1024:
+                    raise ValueError("Document archive expands beyond the safety limit.")
+                if any(i.file_size > 20 * 1024 * 1024 or (i.file_size > 1024 * 1024 and i.file_size / max(1, i.compress_size) > 100) for i in entries):
+                    raise ValueError("Document archive contains an oversized or highly compressed entry.")
+        except zipfile.BadZipFile as e:
+            raise ValueError("Invalid Office document archive.") from e
     try:
         if name.endswith(".pdf"):
             text, ocr_used = _extract_pdf(data, filename=filename or "upload.pdf")

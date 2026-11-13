@@ -3,7 +3,8 @@
 This is the automatic side of the evaluation chapter. RAG questions must cite a
 short verbatim quote from the lecture material; we verify that claim rather than
 trusting the model. The resulting quote-in-source rate is a hard metric that
-compares RAG vs the ungrounded baseline (where quotes are empty by design).
+measures quote provenance only. It does not verify answer correctness, and is not
+a fair accuracy comparison when baseline prompts do not request quotes.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def quote_in_source(quote: str, source_text: str) -> tuple[bool, str]:
 def options_are_unique(options: list[str]) -> bool:
     """True when all four options are distinct after normalisation."""
     norms = [normalize_for_match(o) for o in options]
-    return len(norms) == len(set(norms)) and all(norms)
+    return len(norms) == 4 and len(norms) == len(set(norms)) and all(norms)
 
 
 @dataclass
@@ -118,23 +119,12 @@ def validate_question(
     found, match_type = quote_in_source(question.source_quote, source_text)
     unique = options_are_unique(question.options)
 
-    if not use_rag:
-        # Baseline: quotes should be empty; "grounded" is always False by design.
-        empty = match_type == "empty_quote"
-        return QuestionGrounding(
-            grounded=False,
-            match_type=match_type if not empty else "baseline_empty",
-            source_quote=question.source_quote or "",
-            options_unique=unique,
-            expected_grounded=False,
-        )
-
     return QuestionGrounding(
         grounded=found,
         match_type=match_type,
         source_quote=question.source_quote or "",
         options_unique=unique,
-        expected_grounded=True,
+        expected_grounded=use_rag,
     )
 
 
@@ -189,7 +179,7 @@ def filter_grounded(
     kept_q: list[QuizQuestion] = []
     kept_g: list[QuestionGrounding] = []
     for q, g in zip(questions, groundings):
-        if g.grounded:
+        if g.grounded and g.options_unique:
             kept_q.append(q)
             kept_g.append(g)
     return kept_q, kept_g
@@ -202,23 +192,22 @@ def resolve_grounded_serving(
     use_rag: bool,
     require_grounding: bool,
 ) -> tuple[list[QuizQuestion], list[QuestionGrounding], int, bool]:
-    """Apply require_grounding; never return empty when questions exist.
+    """Strict mode returns no quiz when no questions pass provenance/option checks.
 
-    Returns ``(served_questions, served_groundings, filtered_out, best_effort)``.
-
-    When strict mode would drop every question, falls back to the full model
-    output with ``best_effort=True`` so the student still gets a quiz.
+    The compatibility ``best_effort`` result is always False: relaxing the
+    filter requires an explicit user choice, never a silent fallback.
     """
     if not questions:
         return [], [], 0, False
     if not (use_rag and require_grounding):
-        return list(questions), list(groundings), 0, False
+        usable = [(q, g) for q, g in zip(questions, groundings) if g.options_unique]
+        return [q for q, _ in usable], [g for _, g in usable], len(questions) - len(usable), False
 
     kept_q, kept_g = filter_grounded(questions, groundings)
     filtered_out = len(questions) - len(kept_q)
     if kept_q:
         return kept_q, kept_g, filtered_out, False
-    return list(questions), list(groundings), 0, True
+    return [], [], len(questions), False
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +216,7 @@ def resolve_grounded_serving(
 
 # status: verified | partial | not_found
 _SOFT_LABELS = {
-    "verified": "Verified",
+    "verified": "Quote found",
     "partial": "Partial",
     "not_found": "Not found",
 }
@@ -251,7 +240,7 @@ def soft_badge_for_quote(quote: str | None, source_text: str) -> dict:
         label = "Partial"
     elif found:
         status = "verified"
-        label = "Verified"
+        label = "Quote found"
     else:
         status = "not_found"
         label = "Not found"
@@ -278,13 +267,13 @@ def aggregate_soft_badges(badges: list[dict]) -> dict:
 
     if verified_n == total:
         status = "verified"
-        label = "Verified"
+        label = "Quote found"
     elif verified_n > 0 and (partial_n > 0 or not_found_n > 0):
         status = "partial"
         label = "Partial"
     elif verified_n > 0:
         status = "verified"
-        label = "Verified"
+        label = "Quote found"
     elif not_found_n == total:
         status = "not_found"
         label = "Not found"

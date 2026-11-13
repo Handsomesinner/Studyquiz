@@ -564,7 +564,8 @@
 
   <header class="hero no-print">
     <h1>Turn notes into <em>practice</em></h1>
-    <p>Upload your lecture material. Get quizzes and exam-style papers grounded in what you actually study.</p>
+    <p class="muted">Your files are processed privately; extracted notes are saved in this browser’s workspace. Relevant text, and scanned pages when OCR is needed, are sent to Anthropic. Original uploaded files are deleted after processing; failed cleanup is queued for retry on your next upload. Clearing browser cookies removes access to your saved workspace. Quote checks confirm text matches, not answer correctness.</p>
+    <p>Upload your lecture material. Create practice quizzes and exam-style papers from your notes.</p>
     <div class="pill-row">
       <span class="pill">Grounded in your notes</span>
       <span class="pill">MCQ + theory exams</span>
@@ -688,7 +689,7 @@
       </div>
       <div class="toggle" id="grounding-toggle">
         <input type="checkbox" id="require-grounding" checked />
-        <label for="require-grounding">Only keep questions verified against the notes</label>
+        <label for="require-grounding">Only keep questions whose quotes appear in the notes</label>
       </div>
       <div class="toggle" id="harder-options-toggle">
         <input type="checkbox" id="harder-distractors" />
@@ -918,12 +919,13 @@ function ensureAccessPinInteractive() {
 }
 
 async function api(path, options) {
+  await authReady;
   options = options || {};
   const headers = new Headers(options.headers || {});
   let pin = getAccessPin();
   // Only attach pin for API routes (not needed for static)
   if (path.startsWith("/api/") && path !== "/api/health") {
-    if (!pin && window.__sqAuthRequired) {
+    if (!pin && window.__sqAuthRequired && !new URLSearchParams(location.search).has("share")) {
       pin = ensureAccessPinInteractive();
     }
     if (pin) headers.set("X-StudyQuiz-Pin", pin);
@@ -953,6 +955,8 @@ async function loadAuthHint() {
   try {
     const h = await fetch("/api/health").then((r) => r.json());
     window.__sqAuthRequired = !!h.auth_required;
+    window.__sqWorkspaceId = h.workspace_id;
+    window.__sqServerless = !!h.serverless;
     if (h.blob_access === "private" || h.blob_access === "public") {
       rememberBlobAccess(h.blob_access);
     }
@@ -960,7 +964,7 @@ async function loadAuthHint() {
     window.__sqAuthRequired = false;
   }
 }
-loadAuthHint();
+const authReady = loadAuthHint();
 
 function setMode(mode) {
   if (mode === "exam") appMode = "exam";
@@ -1124,7 +1128,8 @@ function renderGroundingMetrics(g, el, retrieval) {
   if (g) {
     const pre = g.pre_filter || {};
     const served = g.served || {};
-    let mode = g.require_grounding ? "strict (ungrounded dropped)" : "report-only (all kept)";
+    lines.push("Quote provenance only; answer correctness has not been assessed.");
+    let mode = g.require_grounding ? "strict (ungrounded dropped)" : "quote filter off (invalid options excluded)";
     if (g.best_effort) mode = "best-effort (could not verify quotes — still served)";
     lines.push(
       `<strong>Grounding check</strong> — ${mode}`,
@@ -1232,7 +1237,7 @@ function guessContentType(file) {
 function safeBlobPathname(filename) {
   const raw = (filename || "upload.bin").replace(/\\/g, "/").split("/").pop() || "upload.bin";
   const safe = raw.replace(/[^\w.\-()+]+/g, "_").replace(/_+/g, "_");
-  return `uploads/${Date.now()}-${safe}`;
+  return `uploads/${crypto.randomUUID().replaceAll("-", "")}-${safe.slice(-180)}`;
 }
 
 const BLOB_ACCESS_KEY = "sq-blob-access";
@@ -1256,11 +1261,14 @@ function xhrPutToBlob(file, { pathname, contentType, clientToken, access, status
   const what = label || "file";
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({ pathname });
-    const putUrl = `https://blob.vercel-storage.com/?${params.toString()}`;
+    const putUrl = `https://vercel.com/api/blob?${params.toString()}`;
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", putUrl);
     xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
-    xhr.setRequestHeader("x-api-version", "12");
+    xhr.setRequestHeader("x-api-version", "13");
+    xhr.setRequestHeader("x-add-random-suffix", "0");
+    xhr.setRequestHeader("x-allow-overwrite", "0");
+    xhr.setRequestHeader("x-cache-control-max-age", "60");
     xhr.setRequestHeader("x-vercel-blob-access", access);
     xhr.setRequestHeader("x-content-type", contentType);
     xhr.setRequestHeader("x-content-length", String(file.size));
@@ -1314,6 +1322,7 @@ function xhrPutToBlob(file, { pathname, contentType, clientToken, access, status
  * "This blob type is not supported" — that almost always means store mismatch.
  */
 async function putFileToBlob(file, statusEl, label) {
+  await authReady;
   const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
   const pathname = safeBlobPathname(file.name);
   const contentType = guessContentType(file);
@@ -1323,7 +1332,7 @@ async function putFileToBlob(file, statusEl, label) {
   statusEl.textContent = `Preparing ${what} "${file.name}" (${sizeMb} MB)…`;
 
   const tokenHeaders = { "content-type": "application/json" };
-  const pin = getAccessPin();
+  const pin = getAccessPin() || ensureAccessPinInteractive();
   if (pin) tokenHeaders["X-StudyQuiz-Pin"] = pin;
 
   const tokenRes = await fetch(handleUploadUrl, {
@@ -1360,51 +1369,12 @@ async function putFileToBlob(file, statusEl, label) {
     );
   }
 
-  const preferred =
-    rememberedBlobAccess() ||
-    (tokenJson.access === "private" || tokenJson.access === "public"
-      ? tokenJson.access
-      : "public");
-  const fallback = preferred === "public" ? "private" : "public";
-  const order = [preferred, fallback];
-
-  let lastErr = null;
-  for (const access of order) {
-    try {
-      statusEl.textContent = `Uploading ${what}…`;
-      const putResult = await xhrPutToBlob(file, {
-        pathname,
-        contentType,
-        clientToken,
-        access,
-        statusEl,
-        label: what,
-      });
-      if (!putResult || !putResult.url) {
-        throw new Error("Blob upload finished but no file URL was returned.");
-      }
-      rememberBlobAccess(access);
-      return { url: putResult.url, filename: file.name || "upload.bin", access };
-    } catch (err) {
-      lastErr = err;
-      const msg = String((err && err.message) || err || "");
-      const typeMismatch = /blob type is not supported/i.test(msg);
-      if (typeMismatch && access === preferred) {
-        statusEl.textContent =
-          `Store looks ${fallback} — retrying upload as ${fallback}…`;
-        continue;
-      }
-      break;
-    }
-  }
-
-  const msg = String((lastErr && lastErr.message) || lastErr || "upload failed");
-  throw new Error(
-    `Blob storage PUT failed. ${msg} ` +
-      "Tried both public and private access. " +
-      "On Vercel → Storage, check whether the Blob store is Public or Private, " +
-      "set BLOB_ACCESS to match, confirm BLOB_READ_WRITE_TOKEN for this environment, and Redeploy."
-  );
+  if (tokenJson.access !== "private") throw new Error("Private storage is required for your notes.");
+  const putResult = await xhrPutToBlob(file, {
+    pathname, contentType, clientToken, access: "private", statusEl, label: what,
+  });
+  if (!putResult || !putResult.url) throw new Error("No uploaded file URL was returned.");
+  return {url: putResult.url, filename: file.name || "upload.bin", access: "private"};
 }
 
 /** Notes: Blob PUT → index via /api/documents */
@@ -1461,7 +1431,7 @@ $("upload-btn").onclick = async () => {
     // Prefer Blob for large files (required on Vercel above ~4 MB).
     // Fall back to multipart for small files / local without Blob token.
     let doc;
-    if (file.size > BLOB_THRESHOLD_BYTES) {
+    if (window.__sqServerless && file.size > BLOB_THRESHOLD_BYTES) {
       try {
         doc = await uploadViaBlob(file, status);
       } catch (blobErr) {
@@ -1614,7 +1584,7 @@ $("replace-file").onchange = async () => {
   status.className = "status";
   try {
     let doc;
-    if (file.size > BLOB_THRESHOLD_BYTES) {
+    if (window.__sqServerless && file.size > BLOB_THRESHOLD_BYTES) {
       try {
         const { url, filename } = await putFileToBlob(file, status, "notes");
         status.textContent = "Re-indexing document…";
@@ -1730,7 +1700,7 @@ function renderMineAnswers(payload) {
   const gs = payload.grounding;
   if (gs && gs.total_answers) {
     sumText +=
-      ` · quotes: ${gs.verified || 0} verified · ${gs.partial || 0} partial · ${gs.not_found || 0} not found`;
+      ` · quotes: ${gs.verified || 0} quotes found · ${gs.partial || 0} partial · ${gs.not_found || 0} not found`;
   }
   summary.textContent = sumText;
   holder.appendChild(summary);
@@ -1862,7 +1832,7 @@ $("answer-notes-btn").onclick = async () => {
       }
       // Large files: Blob client upload (same as notes) → process by URL.
       // Small files: multipart; fall back to Blob if serverless rejects size.
-      if (file.size > BLOB_THRESHOLD_BYTES) {
+      if (window.__sqServerless && file.size > BLOB_THRESHOLD_BYTES) {
         try {
           const { url, filename } = await putFileToBlob(file, status, "questions");
           status.textContent = "Reading questions and answering from your notes…";
@@ -2031,7 +2001,7 @@ async function generateExam() {
     const eg = exam.grounding || (exam.paper && exam.paper.grounding_summary);
     if (eg && eg.total_parts) {
       m.innerHTML +=
-        `<br><strong>Quote check (soft)</strong> — ${eg.verified || 0} verified · ` +
+        `<br><strong>Quote check (soft)</strong> — ${eg.verified || 0} quotes found · ` +
         `${eg.partial || 0} partial · ${eg.not_found || 0} not found ` +
         `(${eg.total_parts} parts; parts are never dropped)`;
     }
@@ -2215,7 +2185,7 @@ $("gen-answers-btn").onclick = async () => {
     const eg = exam.grounding || (exam.paper && exam.paper.grounding_summary);
     if (eg && eg.total_parts) {
       msg +=
-        ` Quote check: ${eg.verified || 0} verified · ${eg.partial || 0} partial · ${eg.not_found || 0} not found.`;
+        ` Quote check: ${eg.verified || 0} quotes found · ${eg.partial || 0} partial · ${eg.not_found || 0} not found.`;
     }
     st.textContent = msg;
     $("toggle-guides-btn").disabled = false;
@@ -2325,7 +2295,7 @@ function showResults(result) {
     badge.className = "badge";
     if (r.grounded) {
       badge.classList.add("ok");
-      badge.textContent = "Verified in document";
+      badge.textContent = "Quote found in document";
     } else if (r.match_type === "baseline_empty" || r.match_type === "empty_quote") {
       badge.classList.add("base");
       badge.textContent = "Baseline (no source quote)";
@@ -2596,7 +2566,7 @@ function wireExamWriting() {
       clearTimeout(examWriteTimer);
       examWriteTimer = setTimeout(() => saveExamDraftSilent(), 1200);
       try {
-        if (examId) localStorage.setItem("sq-exam-draft-" + examId, JSON.stringify(collectExamAnswers()));
+        if (examId) localStorage.setItem("sq-exam-draft-" + window.__sqWorkspaceId + "-" + examId, JSON.stringify(collectExamAnswers()));
       } catch (_) {}
     });
   });
@@ -2621,7 +2591,7 @@ async function loadExamDraftIntoTextareas() {
     if (d.id) examAttemptId = d.id;
   } catch (_) {
     try {
-      answers = JSON.parse(localStorage.getItem("sq-exam-draft-" + examId) || "{}");
+      answers = JSON.parse(localStorage.getItem("sq-exam-draft-" + window.__sqWorkspaceId + "-" + examId) || "{}");
     } catch (__) {}
   }
   document.querySelectorAll("textarea.exam-write").forEach((ta) => {
@@ -2726,15 +2696,17 @@ renderMineAnswers = function(payload) {
 if ($("copy-quiz-link-btn")) {
   $("copy-quiz-link-btn").onclick = async () => {
     if (!quizId) return;
-    await copyText(shareUrl({ mode: "mcq", quiz: quizId }));
-    alert("Quiz link copied.");
+    const link = await api("/api/share", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({resource_type: "quiz", resource_id: quizId})});
+    await copyText(new URL(link.path, location.origin).href);
+    alert("Practice quiz link copied. It expires in 7 days.");
   };
 }
 if ($("copy-exam-link-btn")) {
   $("copy-exam-link-btn").onclick = async () => {
     if (!examId) return;
-    await copyText(shareUrl({ mode: "exam", exam: examId }));
-    alert("Exam link copied.");
+    const link = await api("/api/share", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({resource_type: "exam", resource_id: examId})});
+    await copyText(new URL(link.path, location.origin).href);
+    alert("Practice exam link copied. It expires in 7 days; each recipient has a private draft.");
   };
 }
 
@@ -2751,11 +2723,11 @@ async function bootDeepLink() {
       let pw = null;
       let data;
       try {
-        data = await api(`/api/share/${encodeURIComponent(share)}`);
+        data = await api(`/api/share/${encodeURIComponent(share)}/redeem`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password: ""})});
       } catch (e) {
         if (String(e.message).toLowerCase().includes("password")) {
           pw = window.prompt("Password for this share link:");
-          data = await api(`/api/share/${encodeURIComponent(share)}?password=${encodeURIComponent(pw || "")}`);
+          data = await api(`/api/share/${encodeURIComponent(share)}/redeem`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password: pw || ""})});
         } else throw e;
       }
       if (data.resource_type === "quiz") { quiz = data.resource_id; mode = "mcq"; }

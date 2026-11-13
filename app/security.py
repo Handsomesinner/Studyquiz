@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import os
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 # Vercel Blob hosts (public + store-prefixed). Extra hosts via BLOB_ALLOWED_HOSTS.
@@ -29,14 +30,18 @@ def access_pin() -> str | None:
     return raw or None
 
 
+def public_deployment() -> bool:
+    return bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+
+
 def auth_required() -> bool:
-    return access_pin() is not None
+    return public_deployment() or access_pin() is not None
 
 
 def pin_matches(provided: str | None) -> bool:
     expected = access_pin()
     if expected is None:
-        return True
+        return not public_deployment()
     if not provided:
         return False
     a = provided.encode("utf-8")
@@ -115,6 +120,8 @@ def validate_download_url(url: str) -> str:
         raise ValueError("Only https URLs are allowed for remote file ingest.")
     if parsed.username or parsed.password:
         raise ValueError("URLs with embedded credentials are not allowed.")
+    if parsed.port not in (None, 443):
+        raise ValueError("Only the standard HTTPS port is allowed.")
     host = parsed.hostname
     if not host_is_allowed_blob(host):
         allowed = ", ".join(f"*.{s}" for s in allowed_blob_host_suffixes())
@@ -128,9 +135,54 @@ def validate_download_url(url: str) -> str:
 
 
 def is_blob_url_for_auth_header(url: str) -> bool:
-    """Whether to attach BLOB_READ_WRITE_TOKEN when downloading."""
-    try:
-        host = urlparse(url).hostname
-    except Exception:
+    """Never send the store credential to a custom host or another store."""
+    token = os.getenv("BLOB_READ_WRITE_TOKEN", "")
+    # Vercel tokens identify their store: vercel_blob_rw_<store>_<secret>.
+    parts = token.split("_")
+    if len(parts) < 5 or parts[:3] != ["vercel", "blob", "rw"]:
         return False
-    return host_is_allowed_blob(host)
+    host = (urlparse(url).hostname or "").lower()
+    store_id = parts[3].lower()
+    return host in {f"{store_id}.public.blob.vercel-storage.com", f"{store_id}.private.blob.vercel-storage.com", f"{store_id}.blob.vercel-storage.com"}
+
+
+workspace: ContextVar[str | None] = ContextVar("workspace", default=None)
+source_path: ContextVar[str | None] = ContextVar("source_path", default=None)
+
+
+class WorkspaceAccessError(Exception):
+    """A resource is absent or belongs to another browser workspace."""
+
+
+def reserve_model_call() -> None:
+    """Conservative hard limits on calls (including OCR, batches and retries)."""
+    if workspace.get() is None:
+        return  # offline use/tests do not consume a deployed student's allowance
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    from . import store
+    day = datetime.now(timezone.utc).date().isoformat()
+    for name, limit in (("global", int(os.getenv("AI_DAILY_GLOBAL_CALLS", "100"))),
+                        (workspace.get(), int(os.getenv("AI_DAILY_WORKSPACE_CALLS", "30")))):
+        if not store.consume_budget(f"ai:{name}:{day}", limit):
+            raise HTTPException(429, "Daily AI allowance reached. No further AI call was made.")
+
+
+def password_hash(password: str) -> str:
+    import hashlib
+    import secrets
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200000).hex()
+    return f"pbkdf2${salt}${digest}"
+
+
+def password_matches(password: str, encoded: str) -> bool:
+    import hashlib
+    try:
+        scheme, salt, digest = encoded.split("$")
+        if scheme != "pbkdf2":
+            return False
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200000).hex()
+        return hmac.compare_digest(actual, digest)
+    except (ValueError, TypeError):
+        return False  # Legacy unsalted links must be recreated, not silently downgraded.

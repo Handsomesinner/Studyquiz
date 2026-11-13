@@ -19,7 +19,7 @@ from collections import Counter
 K1 = 1.5  # term-frequency saturation
 B = 0.75  # document-length normalisation
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 
 # Common English words that carry no topical signal.
 STOPWORDS = frozenset(
@@ -59,6 +59,8 @@ class BM25Retriever:
 
     def search(self, query: str, top_k: int = 6) -> list[tuple[int, float]]:
         """Return (chunk_index, score) for the top_k most relevant chunks."""
+        if not self._avg_length or top_k <= 0:
+            return []
         query_terms = tokenize(query)
         scores = []
         for i, tokens in enumerate(self._doc_tokens):
@@ -84,6 +86,8 @@ class BM25Retriever:
         n = len(self.chunks)
         if n == 0 or top_k <= 0:
             return []
+        if top_k == 1:
+            return [(0, 0.0)]
         if n <= top_k:
             return [(i, 0.0) for i in range(n)]
         # Inclusive endpoints; avoid round() collisions that duplicate indices.

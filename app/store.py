@@ -13,6 +13,8 @@ Without Turso on Vercel, falls back to ``/tmp/studyquiz.db`` (ephemeral).
 from __future__ import annotations
 
 import json
+import functools
+import inspect
 import os
 import re
 import sqlite3
@@ -24,6 +26,7 @@ from typing import Any, Iterator, Sequence
 
 import httpx
 
+from . import security
 from .generator import QuizQuestion
 from .grounding import QuestionGrounding
 from .retriever import BM25Retriever
@@ -383,6 +386,8 @@ def _connect_sqlite() -> sqlite3.Connection:
 
 
 def _connect() -> Any:
+    if _running_serverless() and not using_turso():
+        raise RuntimeError("Durable storage is required on public serverless deployments. Configure Turso.")
     if using_turso():
         return TursoConnection()
     return _connect_sqlite()
@@ -434,6 +439,35 @@ def connection() -> Iterator[Any]:
 
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS share_grants (
+    workspace TEXT NOT NULL, token TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,
+    PRIMARY KEY (workspace, token)
+);
+CREATE TABLE IF NOT EXISTS resource_owners (
+    kind TEXT NOT NULL, resource_id TEXT NOT NULL, workspace TEXT NOT NULL,
+    PRIMARY KEY (kind, resource_id)
+);
+CREATE TABLE IF NOT EXISTS usage_budgets (
+    bucket TEXT PRIMARY KEY, used INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS question_reviews (
+    quiz_id TEXT NOT NULL, question_index INTEGER NOT NULL,
+    answer_correct INTEGER NOT NULL, evidence_supports INTEGER NOT NULL,
+    clear_question INTEGER NOT NULL, notes TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY (quiz_id, question_index)
+);
+CREATE TABLE IF NOT EXISTS generation_runs (
+    id TEXT PRIMARY KEY, workspace TEXT NOT NULL, document_id TEXT NOT NULL,
+    use_rag INTEGER NOT NULL, status TEXT NOT NULL, details_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS document_sources (
+    document_id TEXT NOT NULL, pathname TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS upload_permits (
+    pathname TEXT PRIMARY KEY, workspace TEXT NOT NULL, created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -583,6 +617,85 @@ def _loads(raw: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def resource_allowed(kind: str, resource_id: str, *, shared: bool = False) -> bool:
+    owner = security.workspace.get()
+    if owner is None:  # offline tools/tests; HTTP always sets a workspace
+        return True
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT workspace FROM resource_owners WHERE kind = ? AND resource_id = ?",
+            (kind, resource_id),
+        ).fetchone()
+    return (row is not None and row["workspace"] == owner) or (shared and shared_resource_allowed(kind, resource_id))
+
+
+def _owned(kind: str, key: str, *, create: bool = False, shared: bool = False):
+    """Enforce ownership at the persistence boundary, including nested reads."""
+    def decorate(fn):
+        signature = inspect.signature(fn)
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            rid = bound.arguments[key]
+            owner = security.workspace.get()
+            if owner is not None:
+                if not create and not resource_allowed(kind, rid, shared=shared):
+                    raise security.WorkspaceAccessError()
+                if create:
+                    for parent, pk in (("doc", "document_id"), ("quiz", "quiz_id"), ("exam", "exam_id")):
+                        if pk != key and bound.arguments.get(pk) and not resource_allowed(parent, bound.arguments[pk], shared=(kind in ("attempt", "exam_attempt"))):
+                            raise security.WorkspaceAccessError()
+                    tables = {"doc": ("documents", "id"), "quiz": ("quizzes", "id"), "exam": ("exam_papers", "id"),
+                              "bank": ("question_banks", "id"), "attempt": ("quiz_attempts", "id"),
+                              "exam_attempt": ("exam_attempts", "id"), "card": ("srs_cards", "id"),
+                              "mixed": ("mixed_papers", "id"), "share": ("share_tokens", "token")}
+                    table, column = tables[kind]
+                    with connection() as conn:
+                        existing = conn.execute(f"SELECT {column} FROM {table} WHERE {column} = ?", (rid,)).fetchone()
+                        if existing is not None and not resource_allowed(kind, rid):
+                            # A supplied ID is not permission to claim a legacy/unowned record.
+                            raise security.WorkspaceAccessError()
+                        conn.execute("INSERT OR IGNORE INTO resource_owners VALUES (?, ?, ?)", (kind, rid, owner))
+                    if not resource_allowed(kind, rid):
+                        raise security.WorkspaceAccessError()
+            return fn(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def _visible_list(kind: str, key: str = "id"):
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            return [row for row in fn(*args, **kwargs) if resource_allowed(kind, row[key])]
+        return wrapped
+    return decorate
+
+
+def consume_budget(bucket: str, limit: int) -> bool:
+    """Atomic conditional UPSERT; shared across instances via the durable DB."""
+    with connection() as conn:
+        row = conn.execute(
+            "INSERT INTO usage_budgets (bucket, used) VALUES (?, 1) "
+            "ON CONFLICT(bucket) DO UPDATE SET used = used + 1 WHERE used < ? RETURNING used",
+            (bucket, max(1, limit)),
+        ).fetchone()
+    return row is not None
+
+
+def record_generation_run(run_id: str, document_id: str, use_rag: bool, status: str, details: dict) -> None:
+    with connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO generation_runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (run_id, security.workspace.get() or "offline", document_id, int(use_rag), status, _dumps(details), _now()))
+
+
+def list_generation_runs() -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute("SELECT * FROM generation_runs WHERE workspace = ? ORDER BY created_at", (security.workspace.get() or "offline",)).fetchall()
+    return [{"id": r["id"], "status": r["status"], "use_rag": bool(r["use_rag"]), "details": _loads(r["details_json"])} for r in rows]
+
+
+@_owned("doc", "doc_id", create=True)
 def save_document(
     *,
     doc_id: str,
@@ -600,6 +713,7 @@ def save_document(
         )
 
 
+@_owned("doc", "doc_id")
 def get_document(doc_id: str) -> dict | None:
     """Return {id, title, text, chunks, retriever} or None."""
     with connection() as conn:
@@ -622,6 +736,7 @@ def get_document(doc_id: str) -> dict | None:
     }
 
 
+@_visible_list("doc", "id")
 def list_documents() -> list[dict]:
     with connection() as conn:
         rows = conn.execute(
@@ -645,6 +760,7 @@ def list_documents() -> list[dict]:
     return out
 
 
+@_owned("doc", "doc_id")
 def document_exists(doc_id: str) -> bool:
     with connection() as conn:
         row = conn.execute(
@@ -654,6 +770,7 @@ def document_exists(doc_id: str) -> bool:
     return row is not None
 
 
+@_owned("doc", "doc_id")
 def rename_document(doc_id: str, title: str) -> bool:
     """Update display title. Returns False if the document does not exist."""
     title = (title or "").strip() or "untitled"
@@ -671,6 +788,7 @@ def rename_document(doc_id: str, title: str) -> bool:
     return True
 
 
+@_owned("doc", "doc_id")
 def replace_document(
     *,
     doc_id: str,
@@ -697,6 +815,7 @@ def replace_document(
     return True
 
 
+@_owned("doc", "doc_id")
 def delete_document(doc_id: str) -> bool:
     """Delete a document and related quizzes, attempts, exams, and eval rows.
 
@@ -717,6 +836,11 @@ def delete_document(doc_id: str) -> bool:
         ).fetchall()
         for qrow in quiz_rows:
             qid = qrow["id"]
+            conn.execute("DELETE FROM resource_owners WHERE kind = 'attempt' AND resource_id IN (SELECT id FROM quiz_attempts WHERE quiz_id = ?)", (qid,))
+            conn.execute("DELETE FROM question_reviews WHERE quiz_id = ?", (qid,))
+            conn.execute("DELETE FROM share_grants WHERE kind = 'quiz' AND resource_id = ?", (qid,))
+            conn.execute("DELETE FROM share_tokens WHERE resource_type = 'quiz' AND resource_id = ?", (qid,))
+            conn.execute("DELETE FROM resource_owners WHERE kind = 'quiz' AND resource_id = ?", (qid,))
             conn.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", (qid,))
 
         conn.execute("DELETE FROM quizzes WHERE document_id = ?", (doc_id,))
@@ -726,13 +850,23 @@ def delete_document(doc_id: str) -> bool:
             (doc_id,),
         ).fetchall()
         for er in exam_rows:
+            conn.execute("DELETE FROM resource_owners WHERE kind = 'exam_attempt' AND resource_id IN (SELECT id FROM exam_attempts WHERE exam_id = ?)", (er["id"],))
+            conn.execute("DELETE FROM share_grants WHERE kind = 'exam' AND resource_id = ?", (er["id"],))
+            conn.execute("DELETE FROM share_tokens WHERE resource_type = 'exam' AND resource_id = ?", (er["id"],))
+            conn.execute("DELETE FROM resource_owners WHERE kind = 'exam' AND resource_id = ?", (er["id"],))
             conn.execute(
                 "DELETE FROM exam_attempts WHERE exam_id = ?", (er["id"],)
             )
         conn.execute("DELETE FROM exam_papers WHERE document_id = ?", (doc_id,))
         conn.execute("DELETE FROM eval_rows WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM resource_owners WHERE kind = 'card' AND resource_id IN (SELECT id FROM srs_cards WHERE document_id = ?)", (doc_id,))
         conn.execute("DELETE FROM srs_cards WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM resource_owners WHERE kind = 'mixed' AND resource_id IN (SELECT id FROM mixed_papers WHERE document_id = ?)", (doc_id,))
         conn.execute("DELETE FROM mixed_papers WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM resource_owners WHERE kind = 'bank' AND resource_id IN (SELECT id FROM question_banks WHERE document_id = ?)", (doc_id,))
+        conn.execute("DELETE FROM question_banks WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM generation_runs WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM resource_owners WHERE kind = 'doc' AND resource_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     return True
 
@@ -764,6 +898,7 @@ def _grounding_from_dict(d: dict) -> QuestionGrounding:
     )
 
 
+@_owned("quiz", "quiz_id", create=True)
 def save_quiz(
     *,
     quiz_id: str,
@@ -801,6 +936,7 @@ def save_quiz(
         )
 
 
+@_owned("quiz", "quiz_id", shared=True)
 def get_quiz(quiz_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -830,6 +966,7 @@ def get_quiz(quiz_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@_owned("exam", "exam_id", create=True)
 def save_exam_paper(
     *,
     exam_id: str,
@@ -861,6 +998,7 @@ def save_exam_paper(
         )
 
 
+@_owned("exam", "exam_id", shared=True)
 def get_exam_paper(exam_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -881,6 +1019,7 @@ def get_exam_paper(exam_id: str) -> dict | None:
     }
 
 
+@_owned("exam", "exam_id")
 def update_exam_paper(exam_id: str, paper: dict) -> None:
     """Overwrite the stored paper JSON (e.g. after filling answer guides)."""
     with connection() as conn:
@@ -904,6 +1043,7 @@ def update_exam_paper(exam_id: str, paper: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+@_owned("attempt", "attempt_id", create=True)
 def save_attempt(
     *,
     attempt_id: str,
@@ -974,6 +1114,7 @@ def append_eval_rows(rows: list[dict]) -> None:
         )
 
 
+@_visible_list("doc", "document_id")
 def list_eval_rows(*, phase: str | None = None) -> list[dict]:
     with connection() as conn:
         if phase:
@@ -1014,6 +1155,7 @@ def _eval_row_to_dict(row: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@_visible_list("attempt", "id")
 def list_attempts(
     *,
     quiz_id: str | None = None,
@@ -1075,6 +1217,7 @@ def list_attempts(
     return out
 
 
+@_owned("doc", "document_id")
 def list_wrong_items(document_id: str, *, limit: int = 40) -> list[dict]:
     """Wrong MCQ items from recent attempts on this document (newest first, deduped)."""
     attempts = list_attempts(document_id=document_id, limit=30)
@@ -1143,6 +1286,7 @@ def _srs_row_to_dict(row: Any) -> dict:
     }
 
 
+@_owned("card", "card_id", create=True)
 def upsert_srs_card(
     *,
     card_id: str,
@@ -1206,6 +1350,7 @@ def upsert_srs_card(
             )
 
 
+@_owned("card", "card_id")
 def get_srs_card(card_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1214,6 +1359,7 @@ def get_srs_card(card_id: str) -> dict | None:
     return _srs_row_to_dict(row) if row else None
 
 
+@_owned("doc", "document_id")
 def get_srs_card_by_fingerprint(document_id: str, fingerprint: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1223,6 +1369,7 @@ def get_srs_card_by_fingerprint(document_id: str, fingerprint: str) -> dict | No
     return _srs_row_to_dict(row) if row else None
 
 
+@_owned("doc", "document_id")
 def list_due_srs_cards(
     document_id: str,
     *,
@@ -1256,6 +1403,7 @@ def list_due_srs_cards(
     return [_srs_row_to_dict(r) for r in rows]
 
 
+@_owned("doc", "document_id")
 def count_due_srs_cards(document_id: str, *, now_iso: str | None = None) -> int:
     now = now_iso or _now()
     with connection() as conn:
@@ -1266,6 +1414,7 @@ def count_due_srs_cards(document_id: str, *, now_iso: str | None = None) -> int:
     return int(row["n"] if row else 0)
 
 
+@_owned("card", "card_id")
 def update_srs_card_schedule(
     card_id: str,
     *,
@@ -1298,6 +1447,7 @@ def update_srs_card_schedule(
 # ---------------------------------------------------------------------------
 
 
+@_owned("exam_attempt", "attempt_id", create=True)
 def save_exam_attempt(
     *,
     attempt_id: str,
@@ -1315,9 +1465,11 @@ def save_exam_attempt(
         clean[str(k)] = s
     with connection() as conn:
         existing = conn.execute(
-            "SELECT id FROM exam_attempts WHERE id = ?", (attempt_id,)
+            "SELECT id, exam_id FROM exam_attempts WHERE id = ?", (attempt_id,)
         ).fetchone()
         if existing:
+            if existing["exam_id"] != exam_id:
+                raise security.WorkspaceAccessError()
             conn.execute(
                 """
                 UPDATE exam_attempts
@@ -1337,6 +1489,7 @@ def save_exam_attempt(
             )
 
 
+@_owned("exam_attempt", "attempt_id")
 def get_exam_attempt(attempt_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1359,17 +1512,18 @@ def get_latest_exam_draft(exam_id: str) -> dict | None:
         row = conn.execute(
             """
             SELECT * FROM exam_attempts
-            WHERE exam_id = ?
+            WHERE exam_id = ? AND (? IS NULL OR id IN (SELECT resource_id FROM resource_owners WHERE kind = 'exam_attempt' AND workspace = ?))
             ORDER BY updated_at DESC
             LIMIT 1
             """,
-            (exam_id,),
+            (exam_id, security.workspace.get(), security.workspace.get()),
         ).fetchone()
     if row is None:
         return None
     return get_exam_attempt(row["id"])
 
 
+@_visible_list("exam_attempt", "id")
 def list_exam_attempts(exam_id: str) -> list[dict]:
     with connection() as conn:
         rows = conn.execute(
@@ -1397,6 +1551,7 @@ def list_exam_attempts(exam_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+@_owned("bank", "bank_id", create=True)
 def save_question_bank(
     *,
     bank_id: str,
@@ -1420,6 +1575,7 @@ def save_question_bank(
         )
 
 
+@_visible_list("bank", "id")
 def list_question_banks() -> list[dict]:
     with connection() as conn:
         rows = conn.execute(
@@ -1443,6 +1599,7 @@ def list_question_banks() -> list[dict]:
     return out
 
 
+@_owned("bank", "bank_id")
 def get_question_bank(bank_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1459,6 +1616,7 @@ def get_question_bank(bank_id: str) -> dict | None:
     }
 
 
+@_owned("bank", "bank_id")
 def delete_question_bank(bank_id: str) -> bool:
     with connection() as conn:
         exists = conn.execute(
@@ -1470,6 +1628,7 @@ def delete_question_bank(bank_id: str) -> bool:
     return True
 
 
+@_owned("bank", "bank_id")
 def rename_question_bank(bank_id: str, title: str) -> bool:
     title = (title or "").strip() or "Past paper"
     with connection() as conn:
@@ -1490,6 +1649,7 @@ def rename_question_bank(bank_id: str, title: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@_owned("mixed", "mixed_id", create=True)
 def save_mixed_paper(
     *,
     mixed_id: str,
@@ -1513,6 +1673,7 @@ def save_mixed_paper(
         )
 
 
+@_owned("mixed", "mixed_id")
 def get_mixed_paper(mixed_id: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1534,6 +1695,7 @@ def get_mixed_paper(mixed_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@_owned("share", "token", create=True)
 def save_share_token(
     *,
     token: str,
@@ -1551,6 +1713,7 @@ def save_share_token(
         )
 
 
+@_owned("share", "token")
 def get_share_token(token: str) -> dict | None:
     with connection() as conn:
         row = conn.execute(
@@ -1566,3 +1729,54 @@ def get_share_token(token: str) -> dict | None:
         "created_at": row["created_at"],
     }
 
+
+
+def shared_resource_allowed(kind: str, resource_id: str) -> bool:
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM share_grants g JOIN share_tokens s ON s.token = g.token "
+            "WHERE g.workspace = ? AND g.kind = ? AND g.resource_id = ? AND s.created_at > ?",
+            (security.workspace.get(), kind, resource_id, cutoff),
+        ).fetchone()
+    return row is not None
+
+
+def redeem_share(token: str, password: str) -> dict | None:
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    with connection() as conn:
+        row = conn.execute("SELECT s.* FROM share_tokens s JOIN resource_owners o ON o.kind = 'share' AND o.resource_id = s.token WHERE s.token = ? AND s.created_at > ?", (token, cutoff)).fetchone()
+    if row is None:
+        return None
+    if row["password_hash"] and not security.password_matches(password, row["password_hash"]):
+        return None
+    with connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO share_grants VALUES (?, ?, ?, ?)",
+                     (security.workspace.get(), token, row["resource_type"], row["resource_id"]))
+    return {"token": token, "resource_type": row["resource_type"], "resource_id": row["resource_id"],
+            "password_protected": bool(row["password_hash"])}
+
+
+@_owned("share", "token")
+def revoke_share(token: str) -> None:
+    with connection() as conn:
+        conn.execute("DELETE FROM share_tokens WHERE token = ?", (token,))
+        conn.execute("DELETE FROM share_grants WHERE token = ?", (token,))
+
+
+@_owned("quiz", "quiz_id")
+def save_question_review(quiz_id: str, question_index: int, answer_correct: bool, evidence_supports: bool,
+                         clear_question: bool, notes: str = "") -> None:
+    with connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO question_reviews VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (quiz_id, question_index, int(answer_correct), int(evidence_supports), int(clear_question), notes[:2000], _now()))
+
+
+def list_question_reviews() -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute("SELECT r.*, q.use_rag FROM question_reviews r JOIN quizzes q ON q.id = r.quiz_id").fetchall()
+    return [{"quiz_id": r["quiz_id"], "question_index": r["question_index"], "answer_correct": bool(r["answer_correct"]),
+             "evidence_supports": bool(r["evidence_supports"]), "clear_question": bool(r["clear_question"]),
+             "notes": r["notes"], "use_rag": bool(r["use_rag"])} for r in rows if resource_allowed("quiz", r["quiz_id"])]

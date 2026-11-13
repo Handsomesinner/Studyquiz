@@ -8,6 +8,7 @@ a fuller model answer grounded only in those excerpts.
 from __future__ import annotations
 
 import re
+from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
@@ -252,7 +253,7 @@ def answer_questions(
 
     workers = min(len(qs), 4)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(work, i, q): i for i, q in enumerate(qs)}
+        futs = {pool.submit(copy_context().run, work, i, q): i for i, q in enumerate(qs)}
         for fut in as_completed(futs):
             i = futs[fut]
             q = qs[i]

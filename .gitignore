@@ -9,3 +9,10 @@ data/
 # Node (report generator only)
 node_modules/
 
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key

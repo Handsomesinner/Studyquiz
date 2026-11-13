@@ -13,6 +13,7 @@ document (syllabus coverage) rather than dumping the whole PDF into one call.
 from __future__ import annotations
 
 import os
+from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pydantic import BaseModel, Field
@@ -135,7 +136,9 @@ def _client():
             "environment variable before starting the server "
             "(get a key at https://platform.claude.com/)."
         )
-    return anthropic.Anthropic()
+    from .security import reserve_model_call
+    reserve_model_call()
+    return anthropic.Anthropic(max_retries=0)
 
 
 def _api_error_message(exc: Exception) -> str:
@@ -401,7 +404,7 @@ def _run_parallel_questions(
     workers = min(len(indices), 4)
     with ThreadPoolExecutor(max_workers=workers) as pool_exec:
         futures = {
-            pool_exec.submit(
+            pool_exec.submit(copy_context().run,
                 _generate_one_question,
                 question_number=i + 1,
                 num_questions=num_questions,
@@ -794,7 +797,7 @@ def fill_answer_guides(
     workers = min(len(paper.questions), 4)
     with ThreadPoolExecutor(max_workers=workers) as pool_exec:
         futures = {
-            pool_exec.submit(work, q): i for i, q in enumerate(paper.questions)
+            pool_exec.submit(copy_context().run, work, q): i for i, q in enumerate(paper.questions)
         }
         for fut in as_completed(futures):
             i = futures[fut]

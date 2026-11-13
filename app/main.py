@@ -14,16 +14,21 @@ Run with:  uvicorn app.main:app --reload
 from __future__ import annotations
 
 import csv
+import hashlib
+import secrets
+import time
+import re
 import io
 import os
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from . import (
@@ -45,7 +50,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # App-side ceiling (local multipart + blob-download path).
 # On Vercel, multipart bodies are still capped by the platform (~4.5 MB);
 # large files must use client → Vercel Blob → process-by-URL.
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+MAX_UPLOAD_BYTES = min(100, max(1, int(os.getenv("MAX_UPLOAD_MB", "100")))) * 1024 * 1024
 # Guard extracted text so a huge PDF cannot explode SQLite / BM25 memory.
 MAX_EXTRACTED_CHARS = int(os.getenv("MAX_EXTRACTED_CHARS", "5000000"))
 # Direct multipart is only reliable under the Vercel body limit when live.
@@ -61,6 +66,9 @@ _PROTECTED_PREFIXES = (
     "/api/study",
     "/api/banks",
     "/api/share",
+    "/api/blob",
+    "/api/uploads",
+    "/api/workspace",
 )
 
 
@@ -69,28 +77,17 @@ def require_access_pin(request: Request) -> None:
     if not security.auth_required():
         return
     path = request.url.path.rstrip("/")
-    method = request.method.upper()
 
-    # Take / grade / load shared resources without PIN (hard-to-guess ids).
-    if method == "POST" and path.startswith("/api/quiz/") and path.endswith("/submit"):
+    if request.method == "POST" and re.fullmatch(r"/api/share/[a-f0-9]{32}/redeem", path):
         return
-    if method == "GET" and path.startswith("/api/quiz/") and "/evaluation" not in path:
-        return
-    if method == "GET" and path.startswith("/api/exam/"):
-        # Allow GET paper and draft load; block GET that doesn't exist for answers
-        if path.endswith("/answers"):
-            pass  # still require pin for generating guides
-        else:
+    match = re.fullmatch(r"/api/(quiz|exam)/([a-f0-9]+)(/submit|/draft|/submit-writing)?", path)
+    if match:
+        kind, rid, action = match.groups()
+        permitted = ((request.method == "GET" and action in (None, "/draft")) or
+                     (request.method == "PUT" and action == "/draft") or
+                     (request.method == "POST" and action in ("/submit", "/submit-writing")))
+        if permitted and store.shared_resource_allowed(kind, rid):
             return
-    if method == "PUT" and "/draft" in path and path.startswith("/api/exam/"):
-        return
-    if method == "POST" and path.startswith("/api/exam/") and path.endswith("/submit-writing"):
-        return
-    if method == "GET" and path.startswith("/api/share/"):
-        return
-    if method == "POST" and path.startswith("/api/study/review"):
-        return
-
     pin = security.extract_pin_from_request_headers(request.headers)
     if not security.pin_matches(pin):
         raise HTTPException(
@@ -100,20 +97,104 @@ def require_access_pin(request: Request) -> None:
         )
 
 
+@app.exception_handler(security.WorkspaceAccessError)
+async def workspace_error(_request, _error):
+    return JSONResponse({"detail": "Resource not found in this workspace."}, status_code=404)
+
+
 @app.middleware("http")
 async def access_pin_middleware(request: Request, call_next):
     path = request.url.path
-    # CORS preflight
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    if any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES):
-        try:
-            require_access_pin(request)
-        except HTTPException as e:
-            from fastapi.responses import JSONResponse
+    cookie = request.cookies.get("sq_workspace", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", cookie):
+        cookie = secrets.token_urlsafe(32)
+    ctx = security.workspace.set(hashlib.sha256(cookie.encode()).hexdigest())
+    try:
+        if request.method != "OPTIONS" and any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES):
+            if security.public_deployment() and len(security.access_pin() or "") < 16:
+                return JSONResponse({"detail": "Configure a deployment access secret of at least 16 characters."}, status_code=503)
+            try:
+                require_access_pin(request)
+            except HTTPException as e:
+                return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+            if store._running_serverless() and not store.storage_is_durable():
+                return JSONResponse({"detail": "Durable storage must be configured before this deployment can save work."}, status_code=503)
+            # API requests must be same-site; PIN alone does not make CORS safe.
+            origin = request.headers.get("origin")
+            if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+                return JSONResponse({"detail": "Cross-origin API requests are not permitted."}, status_code=403)
+        response = await call_next(request)
+        response.set_cookie("sq_workspace", cookie, max_age=31536000, httponly=True,
+                            secure=security.public_deployment(), samesite="lax")
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    finally:
+        security.workspace.reset(ctx)
 
-            return JSONResponse({"detail": e.detail}, status_code=e.status_code)
-    return await call_next(request)
+
+@app.get("/api/workspace")
+def current_workspace():
+    return {"workspace_id": security.workspace.get(), "storage": "browser-bound; clearing cookies removes access"}
+
+
+class UploadPermit(BaseModel):
+    pathname: str
+
+
+@app.post("/api/blob/permit")
+def issue_upload_permit(body: UploadPermit):
+    if not re.fullmatch(r"uploads/[a-f0-9]{32}-[A-Za-z0-9_.()+-]{1,180}", body.pathname):
+        raise HTTPException(400, "Invalid upload pathname.")
+    day = datetime.now(timezone.utc).date().isoformat()
+    owner = security.workspace.get()
+    for bucket, limit in ((f"upload:global:{day}", 100), (f"upload:{owner}:{day}", 20)):
+        if not store.consume_budget(bucket, limit):
+            raise HTTPException(429, "Daily upload limit reached. Try again tomorrow.")
+    cleanup_uploads(limit=1)  # opportunistic bounded retry; does not delay a grant by a whole queue
+    with store.connection() as conn:
+        conn.execute("INSERT INTO upload_permits VALUES (?, ?, ?)", (body.pathname, owner, datetime.now(timezone.utc).isoformat()))
+    return {"ok": True}
+
+
+def _require_upload_permit(url: str) -> str:
+    # Even a valid Blob URL is not authorization: verify this store and workspace.
+    if not security.is_blob_url_for_auth_header(url):
+        raise HTTPException(400, "Only files uploaded to this application's private store are accepted.")
+    pathname = unquote(urlparse(url).path).lstrip("/")
+    with store.connection() as conn:
+        row = conn.execute("SELECT workspace FROM upload_permits WHERE pathname = ?", (pathname,)).fetchone()
+    if row is None or row["workspace"] != security.workspace.get():
+        raise HTTPException(404, "Upload not found in this workspace.")
+    return pathname
+
+
+def _delete_uploaded_source(pathname: str) -> bool:
+    # Vercel Blob SDK delete protocol. Retain failed cleanup records for retry.
+    try:
+        response = httpx.post("https://vercel.com/api/blob/delete", json={"urls": [pathname]},
+                              headers={"Authorization": "Bearer " + os.environ["BLOB_READ_WRITE_TOKEN"], "x-api-version": "13"}, timeout=5)
+        response.raise_for_status()
+    except Exception:
+        return False
+    with store.connection() as conn:
+        conn.execute("DELETE FROM upload_permits WHERE pathname = ?", (pathname,))
+        conn.execute("DELETE FROM document_sources WHERE pathname = ?", (pathname,))
+    return True
+
+
+@app.post("/api/uploads/cleanup")
+def cleanup_uploads(limit: int = 10):
+    limit = max(1, min(limit, 10))
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with store.connection() as conn:
+        rows = conn.execute("SELECT pathname FROM upload_permits WHERE workspace = ? AND created_at < ? LIMIT ?",
+                            (security.workspace.get(), cutoff, limit)).fetchall()
+    deleted = sum(_delete_uploaded_source(r["pathname"]) for r in rows)
+    return {"deleted": deleted, "retry_pending": len(rows) - deleted}
 
 
 @app.on_event("startup")
@@ -142,13 +223,13 @@ def health():
         store.init_db()
         ok = True
         detail = "ok"
-    except Exception as e:
+    except Exception:
         ok = False
-        detail = f"{type(e).__name__}: {e}"
+        detail = "Storage unavailable; check deployment configuration."
     return {
         "status": "ok" if ok else "degraded",
-        "db_path": info["db_path"],
-        "storage": info,
+        "workspace_id": security.workspace.get(),
+        "storage": {"durable": info["durable"], "hint": info["hint"]},
         "storage_backend": info["backend"],
         "storage_durable": info["durable"],
         "serverless": store._running_serverless(),
@@ -157,7 +238,7 @@ def health():
         "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
         "blob_access": (
             "private"
-            if (os.getenv("BLOB_ACCESS") or "public").strip().lower() == "private"
+            if (os.getenv("BLOB_ACCESS") or "private").strip().lower() == "private"
             else "public"
         ),
         "auth_required": security.auth_required(),
@@ -236,6 +317,9 @@ def _index_document_bytes(
             chunks=chunks,
         )
         replaced = False
+    if security.source_path.get():
+        with store.connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO document_sources VALUES (?, ?)", (doc_id, security.source_path.get()))
     return {
         "id": doc_id,
         "title": title,
@@ -263,6 +347,7 @@ def _download_url_to_bytes(url: str) -> bytes:
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
+    _require_upload_permit(url)
     max_bytes = MAX_UPLOAD_BYTES
     headers: dict[str, str] = {}
     blob_token = os.getenv("BLOB_READ_WRITE_TOKEN") or ""
@@ -288,6 +373,8 @@ def _download_url_to_bytes(url: str) -> bytes:
                                 400,
                                 f"Redirect target blocked: {e}",
                             ) from e
+                        if urlparse(current).hostname != urlparse(url).hostname:
+                            raise HTTPException(400, "Cross-store redirects are not permitted.")
                         continue
 
                     if resp.status_code >= 400:
@@ -317,8 +404,30 @@ def _download_url_to_bytes(url: str) -> bytes:
     except Exception as e:
         raise HTTPException(
             400,
-            f"Failed to download file for indexing: {type(e).__name__}: {e}",
+            "Failed to download the uploaded file. Please retry.",
         ) from e
+
+
+@contextmanager
+def uploaded_source(url: str):
+    pathname = _require_upload_permit(url)
+    source_ctx = security.source_path.set(pathname)
+    try:
+        yield _download_url_to_bytes(url)
+    finally:
+        security.source_path.reset(source_ctx)
+        if not _delete_uploaded_source(pathname):
+            # No URL/token in logs. Cleanup queue survives worker restarts.
+            import logging
+            logging.getLogger(__name__).warning("Uploaded source cleanup pending")
+
+
+async def _read_bounded_file(file) -> bytes:
+    ceiling = DIRECT_MULTIPART_SAFE_BYTES if store._running_serverless() else MAX_UPLOAD_BYTES
+    data = await file.read(ceiling + 1)
+    if len(data) > ceiling:
+        raise HTTPException(413, "File exceeds the upload size limit. Use a smaller file or private Blob upload.")
+    return data
 
 
 class DocumentFromUrl(BaseModel):
@@ -345,9 +454,9 @@ async def upload_document(request: Request):
                 400,
                 "JSON body must include a string 'url' (and optional 'filename').",
             )
-        data = _download_url_to_bytes(payload.url)
-        filename = payload.filename or _filename_from_url(payload.url)
-        return _index_document_bytes(filename, data)
+        with uploaded_source(payload.url) as data:
+            filename = payload.filename or _filename_from_url(payload.url)
+            return _index_document_bytes(filename, data)
 
     # Classic multipart (local dev / small files).
     form = await request.form()
@@ -358,7 +467,7 @@ async def upload_document(request: Request):
             "Expected multipart field 'file', or JSON {url, filename} after "
             "Vercel Blob client upload.",
         )
-    data = await file.read()
+    data = await _read_bounded_file(file)
     filename = getattr(file, "filename", None) or "upload.bin"
     if (
         store._running_serverless()
@@ -397,7 +506,13 @@ def rename_document(doc_id: str, body: DocumentRename):
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str):
-    """Delete a document and related quizzes / exam papers / eval rows."""
+    """Delete the source file first, then related saved work."""
+    store.document_exists(doc_id)  # ownership guard before any storage action
+    with store.connection() as conn:
+        sources = conn.execute("SELECT pathname FROM document_sources WHERE document_id = ?", (doc_id,)).fetchall()
+    for source in sources:
+        if not _delete_uploaded_source(source["pathname"]):
+            raise HTTPException(503, "Original-file deletion could not be confirmed. Your saved work was retained so you can retry deletion.")
     if not store.delete_document(doc_id):
         raise HTTPException(404, "Document not found.")
     return {"ok": True, "id": doc_id}
@@ -423,11 +538,9 @@ async def replace_document(doc_id: str, request: Request):
                 400,
                 "JSON body must include a string 'url' (and optional 'filename').",
             )
-        data = _download_url_to_bytes(payload.url)
-        filename = payload.filename or _filename_from_url(payload.url)
-        return _index_document_bytes(
-            filename, data, replace_doc_id=doc_id
-        )
+        with uploaded_source(payload.url) as data:
+            filename = payload.filename or _filename_from_url(payload.url)
+            return _index_document_bytes(filename, data, replace_doc_id=doc_id)
 
     form = await request.form()
     file = form.get("file")
@@ -437,7 +550,7 @@ async def replace_document(doc_id: str, request: Request):
             "Expected multipart field 'file', or JSON {url, filename} after "
             "Vercel Blob client upload.",
         )
-    data = await file.read()
+    data = await _read_bounded_file(file)
     filename = getattr(file, "filename", None) or "upload.bin"
     if (
         store._running_serverless()
@@ -555,8 +668,23 @@ def create_quiz(req: QuizRequest):
     context_chunks = [doc["chunks"][i] for i in plan.chunk_indices] if plan.chunk_indices else []
     source_text = doc.get("text") or "\n\n".join(doc["chunks"])
 
+    run_id = uuid.uuid4().hex
+    raw_attempts = []
+    started = time.monotonic()
+    def generate_attempt(**kwargs):
+        try:
+            result = _generate_mcq_attempt(**kwargs)
+        except Exception as error:
+            store.record_generation_run(run_id, req.document_id, req.use_rag, "attempt_failed",
+                                        {"attempts": raw_attempts, "elapsed_seconds": time.monotonic() - started,
+                                         "error_type": type(error).__name__, "http_status": getattr(error, "status_code", None)})
+            raise
+        raw_attempts.append({"questions": [q.model_dump() for q in result[0].questions], "metrics": result[2].to_dict()})
+        store.record_generation_run(run_id, req.document_id, req.use_rag, "generated", {"attempts": raw_attempts})
+        return result
+
     try:
-        quiz, pre_groundings, pre_metrics = _generate_mcq_attempt(
+        quiz, pre_groundings, pre_metrics = generate_attempt(
             doc=doc,
             num_questions=num_questions,
             plan=plan,
@@ -568,8 +696,12 @@ def create_quiz(req: QuizRequest):
             harder_distractors=req.harder_distractors,
         )
     except generator.GenerationError as e:
+        store.record_generation_run(run_id, req.document_id, req.use_rag, "generation_failed", {"attempts": raw_attempts, "elapsed_seconds": time.monotonic() - started})
         raise HTTPException(503, str(e))
 
+    original_questions = list(quiz.questions)
+    original_groundings = list(pre_groundings)
+    original_metrics = pre_metrics
     if not quiz.questions:
         raise HTTPException(
             503,
@@ -593,7 +725,7 @@ def create_quiz(req: QuizRequest):
         if bad_idx and len(bad_idx) < len(quiz.questions):
             n_retry = len(bad_idx)
             try:
-                repl_quiz, repl_g, _ = _generate_mcq_attempt(
+                repl_quiz, repl_g, _ = generate_attempt(
                     doc=doc,
                     num_questions=n_retry,
                     plan=plan,
@@ -631,7 +763,7 @@ def create_quiz(req: QuizRequest):
         elif bad_idx and len(bad_idx) == len(quiz.questions):
             # All ungrounded: one full regenerate (existing soft-fallback path)
             try:
-                quiz2, pre2, metrics2 = _generate_mcq_attempt(
+                quiz2, pre2, metrics2 = generate_attempt(
                     doc=doc,
                     num_questions=num_questions,
                     plan=plan,
@@ -664,7 +796,7 @@ def create_quiz(req: QuizRequest):
         )
     )
 
-    # If filter emptied after partial work, soft best-effort already handled
+    # Strict mode never silently relaxes verification.
     retried = partial_retries > 0
 
     post_metrics = grounding.summarise(served_groundings, use_rag=req.use_rag)
@@ -696,7 +828,7 @@ def create_quiz(req: QuizRequest):
         topic=req.topic,
         questions=served_questions,
         groundings=served_groundings,
-        pre_filter_metrics=pre_metrics.to_dict(),
+        pre_filter_metrics=original_metrics.to_dict(),
         served_metrics=post_metrics.to_dict(),
         context_chunks=context_chunks,
     )
@@ -708,8 +840,8 @@ def create_quiz(req: QuizRequest):
             doc_title=doc["title"] or "",
             topic=req.topic,
             use_rag=req.use_rag,
-            questions=quiz.questions,
-            groundings=pre_groundings,
+            questions=original_questions,
+            groundings=original_groundings,
             phase="pre_filter",
         )
         + _build_eval_rows(
@@ -723,6 +855,14 @@ def create_quiz(req: QuizRequest):
             phase="served",
         )
     )
+
+    store.record_generation_run(run_id, req.document_id, req.use_rag,
+                                "served" if served_questions else "verification_failed",
+                                {"attempts": raw_attempts, "served_count": len(served_questions),
+                                 "elapsed_seconds": time.monotonic() - started,
+                                 "accuracy_measured": False})
+    if not served_questions:
+        raise HTTPException(422, "No questions passed the source-quote and option checks. No unverified quiz was served. Try different notes or explicitly turn off the quote filter.")
 
     # Answers stay server-side; the client only sees questions and options.
     # Grounding flags are revealed after submit (or via evaluation endpoints).
@@ -738,7 +878,7 @@ def create_quiz(req: QuizRequest):
         "grounding": {
             "require_grounding": req.require_grounding and req.use_rag,
             "filtered_out": filtered_out,
-            "pre_filter": pre_metrics.to_dict(),
+            "pre_filter": original_metrics.to_dict(),
             "served": post_metrics.to_dict(),
             "retried": retried,
             "partial_retries": partial_retries,
@@ -797,7 +937,7 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
         from . import study as study_mod
 
         doc_id = quiz.get("doc_id")
-        if doc_id:
+        if doc_id and store.resource_allowed("doc", doc_id):
             for i, (q, r) in enumerate(zip(questions, results)):
                 fp = study_mod.fingerprint_question(q.question)
                 payload = {
@@ -853,6 +993,8 @@ def submit_quiz(quiz_id: str, req: SubmitRequest):
 
 @app.get("/api/quiz/{quiz_id}/evaluation")
 def quiz_evaluation(quiz_id: str):
+    if not store.resource_allowed("quiz", quiz_id):
+        raise security.WorkspaceAccessError()
     """JSON evaluation summary for one quiz (for the report / tooling)."""
     quiz = store.get_quiz(quiz_id)
     if quiz is None:
@@ -882,6 +1024,24 @@ def quiz_evaluation(quiz_id: str):
     }
 
 
+class QuestionReview(BaseModel):
+    answer_correct: bool
+    evidence_supports: bool
+    clear_question: bool
+    notes: str = Field(default="", max_length=2000)
+
+
+@app.put("/api/quiz/{quiz_id}/reviews/{question_index}")
+def review_question(quiz_id: str, question_index: int, body: QuestionReview):
+    if not store.resource_allowed("quiz", quiz_id):
+        raise security.WorkspaceAccessError()
+    quiz = store.get_quiz(quiz_id)
+    if quiz is None or not 0 <= question_index < len(quiz["questions"]):
+        raise HTTPException(404, "Question not found.")
+    store.save_question_review(quiz_id, question_index, **body.model_dump())
+    return {"ok": True, "method": "human review; not automatic accuracy"}
+
+
 @app.get("/api/evaluation/export")
 def export_evaluation_csv():
     """Download all recorded question-level evaluation rows as CSV.
@@ -896,6 +1056,7 @@ def export_evaluation_csv():
             "No evaluation data yet. Generate at least one quiz first.",
         )
 
+    reviews = {(r["quiz_id"], r["question_index"]): r for r in store.list_question_reviews()}
     fieldnames = [
         "timestamp",
         "quiz_id",
@@ -913,12 +1074,15 @@ def export_evaluation_csv():
         "match_type",
         "options_unique",
         "expected_grounded",
+        "answer_correct", "evidence_supports", "clear_question", "review_notes",
     ]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in eval_rows:
-        writer.writerow(row)
+        review = reviews.get((row.get("quiz_id"), row.get("question_index")), {}) if row.get("phase") == "served" else {}
+        row = {**row, **{k: review.get(k, "") for k in ("answer_correct", "evidence_supports", "clear_question")}, "review_notes": review.get("notes", "")}
+        writer.writerow({k: ("'" + v if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else v) for k, v in row.items()})
 
     buf.seek(0)
     filename = f"studyquiz_evaluation_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
@@ -933,8 +1097,6 @@ def export_evaluation_csv():
 def evaluation_summary():
     """Aggregate quote-in-source rates by condition (RAG vs baseline)."""
     eval_rows = store.list_eval_rows()
-    if not eval_rows:
-        return {"quizzes": 0, "by_condition": {}}
 
     # Use pre_filter rows so filtering does not hide model failure rate.
     rows = [r for r in eval_rows if r.get("phase") == "pre_filter"]
@@ -962,7 +1124,20 @@ def evaluation_summary():
             "quote_in_source_rate": bucket["grounded"] / n,
             "options_unique_rate": bucket["options_unique"] / n,
         }
-    return {"by_condition": out}
+    reviewed = store.list_question_reviews()
+    human = {}
+    for condition in (True, False):
+        items = [r for r in reviewed if r["use_rag"] == condition]
+        human["rag" if condition else "baseline"] = {
+            "reviewed_questions": len(items),
+            "answer_correct_rate": sum(r["answer_correct"] for r in items) / len(items) if items else None,
+            "evidence_support_rate": sum(r["evidence_supports"] for r in items) / len(items) if items else None,
+            "clear_question_rate": sum(r["clear_question"] for r in items) / len(items) if items else None,
+        }
+    return {"quizzes": len({r.get("quiz_id") for r in eval_rows}), "by_condition": out, "human_review": human, "metric": "quote provenance, not answer correctness",
+            "accuracy_comparison_available": False,
+            "note": "Baseline prompts do not request source quotes. Do not interpret quote rates as comparative accuracy.",
+            "generation_runs": store.list_generation_runs()}
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1270,8 @@ def get_exam(exam_id: str):
 
 @app.post("/api/exam/{exam_id}/answers")
 def generate_exam_answers(exam_id: str):
+    if not store.resource_allowed("exam", exam_id):
+        raise security.WorkspaceAccessError()
     """Generate marking scheme + model-answer outlines from the lecture notes.
 
     Call this *after* attempting the paper on your own. Answers are grounded
@@ -1214,11 +1391,12 @@ async def answer_from_notes_endpoint(request: Request):
             body.get("questions_file_url") or body.get("file_url") or ""
         ).strip()
         if file_url:
-            file_bytes = _download_url_to_bytes(file_url)
             file_name = (
                 str(body.get("questions_filename") or body.get("filename") or "").strip()
                 or _filename_from_url(file_url, "questions.pdf")
             )
+            with uploaded_source(file_url) as uploaded:
+                pre_parsed.extend(_questions_from_file_bytes(file_name, uploaded))
         if bank_id and not pre_parsed:
             bank = store.get_question_bank(bank_id)
             if bank is None:
@@ -1230,7 +1408,7 @@ async def answer_from_notes_endpoint(request: Request):
         questions_text = str(form.get("questions_text") or form.get("text") or "")
         f = form.get("file")
         if f is not None and hasattr(f, "read"):
-            file_bytes = await f.read()
+            file_bytes = await _read_bounded_file(f)
             file_name = getattr(f, "filename", None) or "questions.txt"
             if (
                 store._running_serverless()
@@ -1568,7 +1746,7 @@ class ExamDraftRequest(BaseModel):
 def save_exam_draft(exam_id: str, req: ExamDraftRequest):
     if store.get_exam_paper(exam_id) is None:
         raise HTTPException(404, "Exam paper not found.")
-    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex[:12]
+    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex
     store.save_exam_attempt(
         attempt_id=attempt_id,
         exam_id=exam_id,
@@ -1582,7 +1760,7 @@ def save_exam_draft(exam_id: str, req: ExamDraftRequest):
 def submit_exam_writing(exam_id: str, req: ExamDraftRequest):
     if store.get_exam_paper(exam_id) is None:
         raise HTTPException(404, "Exam paper not found.")
-    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex[:12]
+    attempt_id = (req.attempt_id or "").strip() or uuid.uuid4().hex
     store.save_exam_attempt(
         attempt_id=attempt_id,
         exam_id=exam_id,
@@ -1690,14 +1868,16 @@ def create_share(req: ShareCreate):
     rid = (req.resource_id or "").strip()
     if rtype not in ("quiz", "exam"):
         raise HTTPException(400, "resource_type must be quiz or exam.")
+    if not store.resource_allowed(rtype, rid):
+        raise security.WorkspaceAccessError()
     if rtype == "quiz" and store.get_quiz(rid) is None:
         raise HTTPException(404, "Quiz not found.")
     if rtype == "exam" and store.get_exam_paper(rid) is None:
         raise HTTPException(404, "Exam not found.")
-    token = uuid.uuid4().hex[:16]
+    token = uuid.uuid4().hex
     pw_hash = None
     if req.password and req.password.strip():
-        pw_hash = hashlib.sha256(req.password.strip().encode("utf-8")).hexdigest()
+        pw_hash = security.password_hash(req.password.strip())
     store.save_share_token(
         token=token,
         resource_type=rtype,
@@ -1713,21 +1893,22 @@ def create_share(req: ShareCreate):
     }
 
 
-@app.get("/api/share/{token}")
-def resolve_share(token: str, password: str | None = None):
-    import hashlib
+class SharePassword(BaseModel):
+    password: str = Field(default="", max_length=200)
 
-    row = store.get_share_token(token)
-    if row is None:
-        raise HTTPException(404, "Share link not found.")
-    if row.get("password_hash"):
-        given = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
-        if given != row["password_hash"]:
-            raise HTTPException(401, "Password required or incorrect for this share link.")
-    return {
-        "token": token,
-        "resource_type": row["resource_type"],
-        "resource_id": row["resource_id"],
-        "password_protected": bool(row.get("password_hash")),
-    }
 
+@app.post("/api/share/{token}/redeem")
+def resolve_share(token: str, body: SharePassword):
+    day = datetime.now(timezone.utc).date().isoformat()
+    if not store.consume_budget(f"share:global:{day}", 1000) or not store.consume_budget(f"share:{security.workspace.get()}:{day}", 20):
+        raise HTTPException(429, "Share-link attempt limit reached.")
+    result = store.redeem_share(token, body.password)
+    if result is None:
+        raise HTTPException(403, "Share link expired, unavailable, or password incorrect.")
+    return result
+
+
+@app.delete("/api/share/{token}")
+def revoke_share(token: str):
+    store.revoke_share(token)
+    return {"ok": True}

@@ -84,7 +84,9 @@ def _client():
             "This looks like a scanned PDF (no extractable text). "
             "OCR needs ANTHROPIC_API_KEY to read the pages."
         )
-    return anthropic.Anthropic()
+    from .security import reserve_model_call
+    reserve_model_call()
+    return anthropic.Anthropic(max_retries=0)
 
 
 def _ocr_pdf_batch(pdf_bytes: bytes, *, page_label: str) -> str:
