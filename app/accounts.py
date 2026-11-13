@@ -24,12 +24,20 @@ COOKIE = "sq_student"
 SESSION_SECONDS = 12 * 60 * 60
 
 
+def auth_url() -> str:
+    return os.getenv("STUDYQUIZ_AUTH_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or ""
+
+
+def public_key() -> str:
+    return os.getenv("STUDYQUIZ_AUTH_PUBLIC_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") or ""
+
+
 def configured() -> bool:
-    url = urlparse(os.getenv("STUDYQUIZ_AUTH_URL", ""))
+    url = urlparse(auth_url())
     return bool(url.scheme == "https" and re.fullmatch(r"[a-z0-9-]+\.supabase\.co", url.hostname or "")
                 and not url.username and not url.password and url.port in (None, 443)
                 and url.path in ("", "/") and not url.query and not url.fragment
-                and os.getenv("STUDYQUIZ_AUTH_PUBLIC_KEY"))
+                and public_key())
 
 
 def enabled() -> bool:
@@ -39,13 +47,13 @@ def enabled() -> bool:
 def provider(path: str, payload: dict | None = None, *, token: str | None = None) -> dict:
     if not configured():
         raise HTTPException(503, "Student sign-in is not configured yet.")
-    headers = {"apikey": os.environ["STUDYQUIZ_AUTH_PUBLIC_KEY"]}
+    headers = {"apikey": public_key()}
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
         with httpx.Client(timeout=15, follow_redirects=False) as client:
             response = client.request("GET" if payload is None else "POST",
-                os.environ["STUDYQUIZ_AUTH_URL"].rstrip("/") + "/auth/v1/" + path,
+                auth_url().rstrip("/") + "/auth/v1/" + path,
                 headers=headers, json=payload)
         if response.status_code == 429:
             raise HTTPException(429, "Please wait before trying sign-in again.")
@@ -133,7 +141,7 @@ def verify(body: VerifyBody, request: Request):
     user = provider("user", token=access)
     if not user.get("email_confirmed_at") or str(user.get("email", "")).lower() != email or not user.get("id"):
         raise HTTPException(401, "Verify your email before continuing.")
-    workspace = hashlib.sha256((os.environ["STUDYQUIZ_AUTH_URL"].rstrip("/") + ":" + str(user["id"])).encode()).hexdigest()
+    workspace = hashlib.sha256((auth_url().rstrip("/") + ":" + str(user["id"])).encode()).hexdigest()
     raw = secrets.token_urlsafe(32)
     now = int(time.time())
     with store.connection() as conn:

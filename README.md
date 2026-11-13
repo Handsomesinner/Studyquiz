@@ -188,6 +188,8 @@ project), with email authentication enabled:
 
 - `STUDYQUIZ_AUTH_URL`: its HTTPS `https://<project>.supabase.co` URL.
 - `STUDYQUIZ_AUTH_PUBLIC_KEY`: its publishable/anon key, **not** a service-role key.
+- Vercel's native integration variables `NEXT_PUBLIC_SUPABASE_URL` and
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY` are also accepted, without copying credentials.
 - `STUDYQUIZ_AUTH_MODE=accounts`: require verified student sessions instead of
   accepting a shared workspace code. Leave unset while testing in Preview.
 
