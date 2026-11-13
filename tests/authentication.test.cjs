@@ -10,7 +10,7 @@ function setup(status=200) {
     if(!elements.has(id)) elements.set(id, {value:'',textContent:'',disabled:false,hidden:true,focus(){this.focused=true},scrollIntoView(){},classList:{remove(){element(id).hidden=false},add(){element(id).hidden=true}}});
     return elements.get(id);
   };
-  const context = {document:{getElementById:element},sessionStorage:{getItem:k=>stored.get(k)||'',setItem:(k,v)=>stored.set(k,v),removeItem:k=>stored.delete(k)},
+  const context = {AbortSignal,document:{getElementById:element},sessionStorage:{getItem:k=>stored.get(k)||'',setItem:(k,v)=>stored.set(k,v),removeItem:k=>stored.delete(k)},
     window:{prompt(){throw new Error('Native prompt must never be used for access codes')}},
     fetch:async(url,options)=>{requests++;assert.equal(url,'/api/documents');assert.equal(options.headers['X-StudyQuiz-Pin'],element('access-code').value);return {ok:status===200,status,json:async()=>[]}},
     authReady:Promise.resolve(),refreshDocumentList:async()=>{refreshed++},errorDetail:()=> 'Server setup error'};
@@ -45,4 +45,17 @@ test('accepted code is tab-scoped and clears the visible input',async()=>{
 test('blank code does not send a request',async()=>{
   const s=setup();await s.element('access-form').onsubmit({preventDefault(){}});
   assert.equal(s.requests(),0);assert.equal(s.stored.size,0);
+});
+
+test('connection timeout clears the secret and restores the unlock button',async()=>{
+  const s=setup();s.element('access-code').value='synthetic-valid-code';
+  s.context.fetch=async(_url,options)=>{
+    assert.ok(options.signal instanceof AbortSignal);
+    const error=new Error('Timed out');error.name='TimeoutError';throw error;
+  };
+  await s.element('access-form').onsubmit({preventDefault(){}});
+  assert.equal(s.stored.size,0);
+  assert.equal(s.element('access-code').value,'');
+  assert.equal(s.element('access-unlock').disabled,false);
+  assert.match(s.element('access-status').textContent,/internet connection/);
 });
