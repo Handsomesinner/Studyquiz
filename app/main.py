@@ -175,7 +175,7 @@ def _delete_uploaded_source(pathname: str) -> bool:
     # Vercel Blob SDK delete protocol. Retain failed cleanup records for retry.
     try:
         response = httpx.post("https://vercel.com/api/blob/delete", json={"urls": [pathname]},
-                              headers={"Authorization": "Bearer " + os.environ["BLOB_READ_WRITE_TOKEN"], "x-api-version": "13"}, timeout=5)
+                              headers={"Authorization": "Bearer " + security.blob_token(), "x-api-version": "13"}, timeout=5)
         response.raise_for_status()
     except Exception:
         return False
@@ -237,7 +237,7 @@ def health():
         "serverless": store._running_serverless(),
         "detail": detail,
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
-        "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+        "blob_configured": bool(security.blob_token()),
         "blob_access": (
             "private"
             if (os.getenv("BLOB_ACCESS") or "private").strip().lower() == "private"
@@ -352,7 +352,7 @@ def _download_url_to_bytes(url: str) -> bytes:
     _require_upload_permit(url)
     max_bytes = MAX_UPLOAD_BYTES
     headers: dict[str, str] = {}
-    blob_token = os.getenv("BLOB_READ_WRITE_TOKEN") or ""
+    blob_token = security.blob_token()
     if blob_token and security.is_blob_url_for_auth_header(url):
         headers["Authorization"] = f"Bearer {blob_token}"
 

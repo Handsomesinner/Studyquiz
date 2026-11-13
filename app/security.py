@@ -134,9 +134,14 @@ def validate_download_url(url: str) -> str:
     return cleaned
 
 
+def blob_token() -> str:
+    """Prefer isolated private-store credentials over legacy public-store settings."""
+    return (os.getenv("STUDYQUIZ_PRIVATE_BLOB_READ_WRITE_TOKEN") or os.getenv("BLOB_READ_WRITE_TOKEN") or "").strip()
+
+
 def is_blob_url_for_auth_header(url: str) -> bool:
     """Never send the store credential to a custom host or another store."""
-    token = os.getenv("BLOB_READ_WRITE_TOKEN", "")
+    token = blob_token()
     # Vercel tokens identify their store: vercel_blob_rw_<store>_<secret>.
     parts = token.split("_")
     if len(parts) < 5 or parts[:3] != ["vercel", "blob", "rw"]:

@@ -297,3 +297,10 @@ def test_public_missing_configuration_does_not_crash_lifespan(sandbox, monkeypat
         health = c.get('/api/health').json()
         assert health['status'] == 'degraded'
         assert c.get('/api/documents').status_code == 503
+
+
+def test_private_store_credential_takes_precedence_over_legacy_public(sandbox, monkeypatch):
+    monkeypatch.setenv('BLOB_READ_WRITE_TOKEN', 'vercel_blob_rw_legacy_synthetic')
+    monkeypatch.setenv('STUDYQUIZ_PRIVATE_BLOB_READ_WRITE_TOKEN', 'vercel_blob_rw_private_synthetic')
+    assert security.is_blob_url_for_auth_header('https://private.private.blob.vercel-storage.com/notes.pdf')
+    assert not security.is_blob_url_for_auth_header('https://legacy.public.blob.vercel-storage.com/notes.pdf')

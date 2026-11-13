@@ -25,7 +25,7 @@ module.exports = async function handler(req, res) {
   if (body.type !== 'blob.upload-completed' && body.type !== 'blob.generate-client-token') {
     return res.status(400).json({error: 'Unsupported upload event'});
   }
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  const token = process.env.STUDYQUIZ_PRIVATE_BLOB_READ_WRITE_TOKEN || process.env.BLOB_READ_WRITE_TOKEN;
   if (!token || (process.env.BLOB_ACCESS || 'private') !== 'private') {
     return res.status(503).json({error: 'A private Blob store must be configured'});
   }

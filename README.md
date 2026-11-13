@@ -53,7 +53,7 @@ configured. They no longer silently save work to disposable `/tmp` storage.
 | `STUDYQUIZ_ACCESS_PIN` | Required access secret of at least 16 characters; UI prompts for it |
 | `ANTHROPIC_API_KEY` | Claude generation/OCR |
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Durable shared database across workers |
-| `BLOB_READ_WRITE_TOKEN` | Token for this application's **private** Blob store |
+| `STUDYQUIZ_PRIVATE_BLOB_READ_WRITE_TOKEN` | Isolated token for this application's **private** Blob store; legacy `BLOB_READ_WRITE_TOKEN` is a fallback |
 | `BLOB_ACCESS=private` | Public upload mode is refused |
 | `AI_DAILY_GLOBAL_CALLS=100` | Deployment-wide maximum AI calls per UTC day |
 | `AI_DAILY_WORKSPACE_CALLS=30` | Maximum per browser workspace per UTC day |
