@@ -203,7 +203,9 @@ def _startup() -> None:
     # applied lazily on the first DB use so a startup failure cannot 500 the site.
     try:
         store.init_db()
-    except OSError:
+    except (OSError, RuntimeError):
+        # Keep the UI/health page available to explain missing configuration;
+        # protected APIs still fail closed until durable storage is configured.
         pass
 
 

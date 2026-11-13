@@ -287,3 +287,13 @@ def test_complete_generation_failure_is_visible_without_evaluation_rows(sandbox,
     summary = c.get('/api/evaluation/summary').json()
     assert summary['quizzes'] == 0
     assert summary['generation_runs'][0]['status'] == 'generation_failed'
+
+
+def test_public_missing_configuration_does_not_crash_lifespan(sandbox, monkeypatch):
+    monkeypatch.setenv('VERCEL', '1')
+    monkeypatch.delenv('STUDYQUIZ_ACCESS_PIN')
+    with TestClient(main.app) as c:
+        assert c.get('/').status_code == 200
+        health = c.get('/api/health').json()
+        assert health['status'] == 'degraded'
+        assert c.get('/api/documents').status_code == 503
