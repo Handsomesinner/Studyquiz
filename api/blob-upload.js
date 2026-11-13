@@ -3,11 +3,17 @@ const { handleUpload } = require('@vercel/blob/client');
 const { timingSafeEqual } = require('node:crypto');
 
 function validPin(headers) {
+  if (process.env.STUDYQUIZ_AUTH_MODE === 'accounts') return false;
   const expected = (process.env.STUDYQUIZ_ACCESS_PIN || process.env.ACCESS_PIN || process.env.STUDYQUIZ_API_SECRET || '').trim();
   if (!expected || (process.env.VERCEL && expected.length < 16)) return false; // Uploads always fail closed, including misconfigured previews.
   const supplied = String(headers['x-studyquiz-pin'] || (headers.authorization || '').replace(/^Bearer /i, '')).trim();
   const a = Buffer.from(expected), b = Buffer.from(supplied);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function hasStudentSession(headers) {
+  return !!process.env.STUDYQUIZ_AUTH_URL && !!process.env.STUDYQUIZ_AUTH_PUBLIC_KEY &&
+    /(?:^|;\s*)sq_student=[A-Za-z0-9_-]{43}(?:;|$)/.test(headers.cookie || '');
 }
 
 module.exports = async function handler(req, res) {
@@ -19,7 +25,12 @@ module.exports = async function handler(req, res) {
   if (!body || typeof body !== 'object') return res.status(400).json({error: 'Invalid body'});
   // Completion requests are authorized by handleUpload's signature validation;
   // never require a student's PIN on the storage provider's callback.
-  if (body.type !== 'blob.upload-completed' && !validPin(req.headers)) {
+  if (req.headers.origin) {
+    try {
+      if (new URL(req.headers.origin).host !== req.headers.host) return res.status(403).json({error: 'Cross-origin uploads are not permitted'});
+    } catch (_) { return res.status(403).json({error: 'Invalid upload origin'}); }
+  }
+  if (body.type !== 'blob.upload-completed' && !validPin(req.headers) && !hasStudentSession(req.headers)) {
     return res.status(401).json({error: 'Access PIN required'});
   }
   if (body.type !== 'blob.upload-completed' && body.type !== 'blob.generate-client-token') {
@@ -33,14 +44,14 @@ module.exports = async function handler(req, res) {
     const result = await handleUpload({
       body, request: req, token,
       onBeforeGenerateToken: async (pathname) => {
-        if (!validPin(req.headers)) throw new Error('Access PIN required');
+        if (!validPin(req.headers) && !hasStudentSession(req.headers)) throw new Error('Sign in before uploading');
         if (!/^uploads\/[a-f0-9]{32}-[A-Za-z0-9_.()+-]{1,180}$/.test(pathname) ||
             !/\.(pdf|docx|pptx|txt|md|csv)$/i.test(pathname)) throw new Error('Unsupported document pathname');
         // Use the deployment's configured URL, never an untrusted Host header.
         const origin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://127.0.0.1:8000';
         const permit = await fetch(`${origin}/api/blob/permit`, {
           method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
-          headers: {'content-type': 'application/json', 'x-studyquiz-pin': process.env.STUDYQUIZ_ACCESS_PIN || process.env.ACCESS_PIN || process.env.STUDYQUIZ_API_SECRET,
+          headers: {'content-type': 'application/json', 'x-studyquiz-pin': req.headers['x-studyquiz-pin'] || '',
                     cookie: req.headers.cookie || ''},
           body: JSON.stringify({pathname}),
         });

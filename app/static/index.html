@@ -445,6 +445,18 @@
   .option { min-height: 48px; line-height: 1.6; }
   .option input { flex-shrink: 0; width: 1.1rem; height: 1.1rem; }
   .option-text { flex: 1; min-width: 0; }
+  input[type="email"] { width: 100%; padding: .75rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); color: var(--ink); font: inherit; }
+  .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,150px),1fr)); gap: .75rem; margin: 1rem 0; }
+  .dashboard-stat { padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
+  .dashboard-stat strong { display: block; font-size: 1.6rem; color: var(--accent); }
+  .dashboard-list { list-style: none; padding: 0; margin: .5rem 0 1.25rem; }
+  .dashboard-list li { padding: .85rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  .dashboard-list button { margin-top: .5rem; }
+  .dashboard-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .dashboard-table th, .dashboard-table td { text-align: left; padding: .65rem .4rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  .dashboard-table caption { text-align: left; margin-bottom: .5rem; font-weight: 600; }
+  .privacy-note { margin-top: 1rem; font-size: .85rem; color: var(--muted); }
+  .privacy-note summary { cursor: pointer; min-height: 44px; padding: .65rem 0; color: var(--ink-soft); }
   .option:has(input:focus-visible) { outline: 3px solid var(--accent); outline-offset: 3px; }
   .option:has(input:checked)::after { content: "Selected"; font-size: .75rem; margin-left: auto; align-self: center; }
   .option.correct::after { content: "Correct answer"; }
@@ -632,6 +644,35 @@
   </div>
 
 <main id="main-content" tabindex="-1">
+  <section class="card hidden no-print" id="student-signin" aria-labelledby="student-heading">
+    <h2 id="student-heading">Your student account</h2>
+    <p class="hint">Save your work and continue on another device. We’ll email you a personal sign-in code.</p>
+    <form id="email-signin-form">
+      <label class="field-label" for="student-email">Email address</label>
+      <input id="student-email" type="email" autocomplete="email" maxlength="254" required />
+      <button type="submit" class="primary" id="send-email-code">Email me a sign-in code</button>
+    </form>
+    <form id="email-verify-form" class="hidden">
+      <label class="field-label" for="student-code">Code from your email</label>
+      <input id="student-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" required />
+      <button type="submit" class="primary" id="verify-email-code">Sign in</button>
+    </form>
+    <p id="student-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+  <section class="card hidden no-print" id="student-dashboard" aria-labelledby="dashboard-heading">
+    <div class="card-head"><div><h2 id="dashboard-heading">Your study dashboard</h2><p id="student-identity" class="hint"></p></div>
+      <button type="button" class="secondary" id="refresh-dashboard">Refresh</button></div>
+    <div id="dashboard-content"></div>
+    <details id="browser-import" class="hidden"><summary>Bring in older notes from this browser</summary>
+      <p>This moves this browser’s older workspace notes and results into your signed-in account. Only do this on your own browser.</p>
+      <form id="browser-import-form"><label class="field-label" for="previous-workspace-code">Previous workspace passcode</label>
+        <input id="previous-workspace-code" type="password" autocomplete="off" required maxlength="256" />
+        <button type="submit" class="secondary">Move my browser notes into this account</button></form>
+    </details>
+    <p id="dashboard-status" class="status" role="status" aria-live="polite"></p>
+    <div class="btn-row"><button type="button" class="secondary" id="student-logout">Sign out</button>
+      <button type="button" class="secondary" id="student-logout-all">Sign out on all devices</button></div>
+  </section>
   <section class="card hidden no-print" id="access-card" aria-labelledby="access-heading">
     <h2 id="access-heading">Unlock your workspace</h2>
     <p class="hint">Enter the access code set by the project owner. It stays in this browser tab only.</p>
@@ -677,6 +718,9 @@
       <input type="file" id="replace-file" class="hidden" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
     </div>
     <div class="status" id="upload-status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <details class="privacy-note"><summary>How your notes are handled</summary>
+      <p>Your extracted notes and quiz results are saved to your signed-in account, or this browser workspace when using a passcode. Relevant text, and scanned pages when needed, are sent to Anthropic to generate study material. Original uploaded files are deleted after processing; failed cleanup is retried on a later upload. AI answers can be wrong—check them against your notes.</p>
+    </details>
   </section>
 
   <section class="card hidden" id="options-card">
@@ -968,6 +1012,12 @@ function showAccessForm() {
 }
 
 function ensureAccessPinInteractive() {
+  if (window.__sqSignedIn) return "";
+  if (window.__sqAccountsRequired) {
+    $("student-signin").classList.remove("hidden");
+    $("student-email").focus();
+    throw new Error("Sign in to your student account to continue.");
+  }
   const pin = getAccessPin();
   if (pin) return pin;
   showAccessForm();
@@ -1009,7 +1059,7 @@ async function api(path, options) {
   let pin = getAccessPin();
   // Only attach pin for API routes (not needed for static)
   if (path.startsWith("/api/") && path !== "/api/health") {
-    if (!pin && window.__sqAuthRequired && !new URLSearchParams(location.search).has("share")) {
+    if (!pin && !window.__sqSignedIn && window.__sqAuthRequired && !new URLSearchParams(location.search).has("share")) {
       pin = ensureAccessPinInteractive();
     }
     if (pin) headers.set("X-StudyQuiz-Pin", pin);
@@ -1017,6 +1067,13 @@ async function api(path, options) {
   const res = await fetch(path, { ...options, headers });
   const body = await res.json().catch(() => ({}));
   if (res.status === 401 && path.startsWith("/api/")) {
+    if (window.__sqAccountsRequired || window.__sqSignedIn) {
+      window.__sqSignedIn = false;
+      $("student-dashboard").classList.add("hidden");
+      $("student-signin").classList.remove("hidden");
+      $("student-email").focus();
+      throw new Error("Your session has ended. Sign in again to continue.");
+    }
     // Wrong or missing PIN — clear and re-prompt once
     setAccessPin("");
     window.__sqAuthRequired = true;
@@ -1039,7 +1096,11 @@ async function loadAuthHint() {
   try {
     const h = await fetch("/api/health", {signal: AbortSignal.timeout(15000)}).then((r) => r.json());
     window.__sqAuthRequired = !!h.auth_required;
-    if (h.auth_required && !getAccessPin() && !new URLSearchParams(location.search).has("share")) showAccessForm();
+    window.__sqSignedIn = !!h.signed_in;
+    window.__sqAccountsRequired = !!h.accounts_required;
+    if (h.accounts_required) setAccessPin("");
+    if (h.accounts_configured) await initStudentAccount();
+    if (h.auth_required && !h.signed_in && !h.accounts_required && !getAccessPin() && !new URLSearchParams(location.search).has("share")) showAccessForm();
     window.__sqWorkspaceId = h.workspace_id;
     window.__sqServerless = !!h.serverless;
     if (h.blob_access === "private" || h.blob_access === "public") {
@@ -1050,6 +1111,109 @@ async function loadAuthHint() {
   }
 }
 const authReady = loadAuthHint();
+
+async function accountRequest(path, body) {
+  const response = await fetch('/api/account' + path, {method: body === undefined ? 'GET' : 'POST',
+    headers: {'Content-Type':'application/json'}, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25000)});
+  const data = await response.json().catch(()=>({}));
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not complete sign-in. Please try again.');
+  return data;
+}
+
+async function initStudentAccount() {
+  const state = await accountRequest('');
+  if (!state.configured) return;
+  if (state.required) {
+    $('setup-panel').classList.toggle('hidden', !state.user);
+    $('mode-tablist').classList.toggle('hidden', !state.user);
+  }
+  $("student-signin").classList.toggle('hidden', !!state.user);
+  $("student-dashboard").classList.toggle('hidden', !state.user);
+  if (state.user) {
+    $("access-card").classList.add('hidden');
+    $("student-identity").textContent = state.user.email;
+    $("browser-import").classList.toggle('hidden', !state.browser_notes_to_import);
+    await refreshStudentDashboard();
+  }
+}
+
+function dashboardElement(tag, text, parent) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+async function refreshStudentDashboard() {
+  $("dashboard-status").textContent = 'Loading your progress…';
+  try {
+    const data = await accountRequest('/dashboard');
+    const root = $("dashboard-content"); root.replaceChildren();
+    const stats = dashboardElement('div', undefined, root); stats.className='dashboard-grid';
+    for (const [label,value] of [['Saved notes',data.document_count],['Completed quizzes',data.summary.attempts],['Overall quiz score',data.summary.percentage === null ? '—' : data.summary.percentage+'%']]) {
+      const stat=dashboardElement('div',undefined,stats);stat.className='dashboard-stat';
+      dashboardElement('strong',String(value),stat); dashboardElement('span',label,stat);
+    }
+    dashboardElement('h3','Continue studying',root);
+    const docs=dashboardElement('ul',undefined,root);docs.className='dashboard-list';
+    if (!data.documents.length) dashboardElement('li','Upload your first set of notes below to get started.',docs);
+    data.documents.slice(0,10).forEach(doc=>{
+      const item=dashboardElement('li',undefined,docs);dashboardElement('strong',doc.title,item);
+      const button=dashboardElement('button','Continue studying',item);button.className='secondary';button.type='button';
+      button.onclick=async()=>{
+        try {
+          setMode('mcq'); await refreshDocumentList(doc.id); $('doc-select').value=doc.id;
+          $('use-doc-btn').click(); showSetupForEdit();
+        } catch(error) { $('dashboard-status').textContent=error.message; }
+      };
+    });
+    dashboardElement('h3','Progress by topic',root);
+    if (!data.topics.length) dashboardElement('p','Complete a quiz to start tracking progress.',root);
+    else {
+      const table=dashboardElement('table',undefined,root);table.className='dashboard-table';
+      dashboardElement('caption','Scores include repeated attempts. Exam self-assessments are not included.',table);
+      const head=dashboardElement('thead',undefined,table), row=dashboardElement('tr',undefined,head);
+      ['Topic / notes','Attempts','Score'].forEach(t=>{const th=dashboardElement('th',t,row);th.scope='col';});
+      const tbody=dashboardElement('tbody',undefined,table);
+      data.topics.forEach(t=>{const row=dashboardElement('tr',undefined,tbody);[t.topic,String(t.attempts),t.percentage===null?'—':t.percentage+'%'].forEach(v=>dashboardElement('td',v,row));});
+    }
+    if (data.needs_practice.length) dashboardElement('p','Suggested revision: '+data.needs_practice.slice(0,3).map(t=>t.topic).join(', ')+'. These topics have practice scores below 70%.',root);
+    dashboardElement('h3','Recent quiz scores',root);
+    const recent=dashboardElement('ol',undefined,root);recent.className='dashboard-list';
+    if (!data.recent_attempts.length) dashboardElement('li','Your completed quizzes will appear here.',recent);
+    data.recent_attempts.forEach(a=>dashboardElement('li',`${a.topic || a.title}: ${a.score}/${a.total} · ${new Date(a.submitted_at).toLocaleString()}`,recent));
+    $('dashboard-status').textContent=data.note;
+  } catch(error) { $('dashboard-status').textContent=error.message; }
+}
+
+$('email-signin-form').onsubmit=async(event)=>{
+  event.preventDefault();$('send-email-code').disabled=true;
+  try {
+    const data=await accountRequest('/send-code',{email:$('student-email').value.trim()});
+    $('student-status').textContent=data.message;$('email-verify-form').classList.remove('hidden');$('student-code').focus();
+  } catch(error) { $('student-status').textContent=error.message; }
+  finally { $('send-email-code').disabled=false; }
+};
+$('email-verify-form').onsubmit=async(event)=>{
+  event.preventDefault();$('verify-email-code').disabled=true;
+  try {
+    await accountRequest('/verify',{email:$('student-email').value.trim(),code:$('student-code').value.trim()});
+    setAccessPin('');location.reload();
+  } catch(error) { $('student-status').textContent=error.message; }
+  finally { $('student-code').value='';$('verify-email-code').disabled=false; }
+};
+$('refresh-dashboard').onclick=refreshStudentDashboard;
+$('browser-import-form').onsubmit=async(event)=>{
+  event.preventDefault();const button=event.submitter; if(button) button.disabled=true;
+  try {
+    await accountRequest('/import-browser-notes',{previous_code:$('previous-workspace-code').value});
+    location.reload();
+  } catch(error){$('dashboard-status').textContent=error.message;}
+  finally{$('previous-workspace-code').value='';if(button)button.disabled=false;}
+};
+for(const [id,path] of [['student-logout','/logout'],['student-logout-all','/logout-all']]) {
+  $(id).onclick=async()=>{try {await accountRequest(path,{});setAccessPin('');location.reload();} catch(error){$('dashboard-status').textContent=error.message;}};
+}
 
 function setMode(mode) {
   if (mode === "exam") appMode = "exam";

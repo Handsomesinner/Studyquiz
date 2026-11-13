@@ -178,3 +178,44 @@ and Node 22 for automated checks. GitHub workflow setup is separate because
 the connected OAuth app cannot create workflow files. Live private-store and
 Turso configuration still require a preview smoke test using operator-controlled
 test data.
+# Student accounts, dashboard and progress
+
+Student sign-in is optional until configured and verified. The existing PIN
+deployment continues unchanged when the new variables are absent.
+
+Configure a **separate StudyQuiz Supabase Auth project** (not another business's
+project), with email authentication enabled:
+
+- `STUDYQUIZ_AUTH_URL`: its HTTPS `https://<project>.supabase.co` URL.
+- `STUDYQUIZ_AUTH_PUBLIC_KEY`: its publishable/anon key, **not** a service-role key.
+- `STUDYQUIZ_AUTH_MODE=accounts`: require verified student sessions instead of
+  accepting a shared workspace code. Leave unset while testing in Preview.
+
+Configure the email template to display `{{ .Token }}` rather than only a magic
+link. Keep email verification enabled, set a short OTP expiry (10 minutes), and
+configure an authorized SMTP sender before admitting public students. Supabase's
+default mail sender has restrictions; validate delivery to an external student
+address and confirm the sending provider's allowance before release. Do not
+silently enable paid email or unrelated projects' mail credentials.
+
+The application verifies email codes with Supabase, then fetches the verified
+user before creating a StudyQuiz session. Provider access/refresh tokens are not
+returned to the browser or retained. StudyQuiz sessions expire after 12 hours,
+use HttpOnly/SameSite cookies (Secure on public deployments), and store only
+token hashes in Turso. Sign out on one or all devices revokes them immediately.
+The email inbox is the account recovery mechanism; no shared access code is
+required for ordinary student use after account mode is enabled.
+
+The dashboard lists saved notes, weighted MCQ quiz scores, recent attempts,
+topic totals and suggested revision below 70%. Repeated attempts count
+separately; exam self-assessments are excluded and scores are not claims of
+mastery. Summary totals include all owned attempts, even when the recent list
+is limited to 20. Browser-only work is never silently assigned to a new account:
+the signed-in student can explicitly import the current browser's old workspace
+using its previous deployment code. No supplied workspace ID is accepted.
+
+Release checks: verify email delivery, inbox code expiry, two browsers for the
+same account, isolation between students, logout and expiry, authenticated large
+private upload, quiz scoring, dashboard reload, and explicit browser import in
+Preview. Enable accounts in Production only after those checks pass. Keep the
+old deployment code privately available for optional legacy import.

@@ -439,6 +439,14 @@ def connection() -> Iterator[Any]:
 
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS student_accounts (
+    workspace TEXT PRIMARY KEY, email TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS student_sessions (
+    token_hash TEXT PRIMARY KEY, workspace TEXT NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS student_sessions_expiry ON student_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS student_sessions_owner ON student_sessions(workspace);
 CREATE TABLE IF NOT EXISTS share_grants (
     workspace TEXT NOT NULL, token TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,
     PRIMARY KEY (workspace, token)
@@ -592,6 +600,26 @@ CREATE INDEX IF NOT EXISTS idx_exam_attempts_exam ON exam_attempts(exam_id);
 CREATE INDEX IF NOT EXISTS idx_banks_created ON question_banks(created_at);
 CREATE INDEX IF NOT EXISTS idx_mixed_doc ON mixed_papers(document_id);
 """
+
+
+def student_dashboard(workspace: str) -> dict:
+    """Aggregate only owned attempts, including all attempts in summary totals."""
+    with connection() as conn:
+        docs = conn.execute("SELECT d.id, d.title, d.created_at FROM documents d JOIN resource_owners o "
+            "ON o.kind = 'doc' AND o.resource_id = d.id WHERE o.workspace = ? ORDER BY d.created_at DESC LIMIT 100", (workspace,)).fetchall()
+        total_docs = conn.execute("SELECT COUNT(*) AS n FROM resource_owners o JOIN documents d ON d.id = o.resource_id "
+            "WHERE o.kind = 'doc' AND o.workspace = ?", (workspace,)).fetchone()["n"]
+        base = (" FROM quiz_attempts a JOIN resource_owners o ON o.kind = 'attempt' AND o.resource_id = a.id "
+                "JOIN quizzes q ON q.id = a.quiz_id JOIN documents d ON d.id = q.document_id WHERE o.workspace = ?")
+        summary = conn.execute("SELECT COUNT(*) AS attempts, COALESCE(SUM(a.score),0) AS correct, COALESCE(SUM(a.total),0) AS answered" + base, (workspace,)).fetchone()
+        recent = conn.execute("SELECT a.id, a.quiz_id, q.document_id, q.topic, d.title, a.score, a.total, a.submitted_at" + base + " ORDER BY a.submitted_at DESC, a.id DESC LIMIT 20", (workspace,)).fetchall()
+        topics = conn.execute("SELECT COALESCE(NULLIF(q.topic,''),d.title) AS topic, COUNT(*) AS attempts, SUM(a.score) AS correct, SUM(a.total) AS total" + base + " GROUP BY COALESCE(NULLIF(q.topic,''),d.title) ORDER BY total DESC LIMIT 50", (workspace,)).fetchall()
+    topic_rows = [{**dict(t), "percentage": round(100*t["correct"]/t["total"]) if t["total"] else None} for t in topics]
+    return {"documents": [dict(d) for d in docs], "document_count": total_docs,
+            "summary": {**dict(summary), "percentage": round(100*summary["correct"]/summary["answered"]) if summary["answered"] else None},
+            "recent_attempts": [dict(r) for r in recent], "topics": topic_rows,
+            "needs_practice": sorted([t for t in topic_rows if t["percentage"] is not None and t["percentage"] < 70], key=lambda t: t["percentage"]),
+            "note": "Quiz practice only. Repeated attempts count separately; these scores are not a measure of mastery."}
 
 
 def init_db() -> None:

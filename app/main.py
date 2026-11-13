@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from . import (
+    accounts,
     answer_from_notes,
     coverage,
     exam_generator,
@@ -44,6 +45,7 @@ from . import (
 from .retriever import BM25Retriever
 
 app = FastAPI(title="StudyQuiz")
+app.include_router(accounts.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -69,14 +71,19 @@ _PROTECTED_PREFIXES = (
     "/api/blob",
     "/api/uploads",
     "/api/workspace",
+    "/api/account",
 )
 
 
 def require_access_pin(request: Request) -> None:
     """Gate expensive / sensitive APIs when STUDYQUIZ_ACCESS_PIN is set."""
-    if not security.auth_required():
+    if not security.auth_required() and not accounts.enabled():
         return
     path = request.url.path.rstrip("/")
+    if path == "/api/account" or path.startswith("/api/account/"):
+        return  # These handlers perform their own session / email-code checks.
+    if getattr(request.state, "student", None):
+        return
 
     if request.method == "POST" and re.fullmatch(r"/api/share/[a-f0-9]{32}/redeem", path):
         return
@@ -88,6 +95,8 @@ def require_access_pin(request: Request) -> None:
                      (request.method == "POST" and action in ("/submit", "/submit-writing")))
         if permitted and store.shared_resource_allowed(kind, rid):
             return
+    if accounts.enabled():
+        raise HTTPException(401, "Sign in to your student account to continue.")
     pin = security.extract_pin_from_request_headers(request.headers)
     if not security.pin_matches(pin):
         raise HTTPException(
@@ -108,10 +117,18 @@ async def access_pin_middleware(request: Request, call_next):
     cookie = request.cookies.get("sq_workspace", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{43}", cookie):
         cookie = secrets.token_urlsafe(32)
-    ctx = security.workspace.set(hashlib.sha256(cookie.encode()).hexdigest())
+    try:
+        student = accounts.resolve_session(request.cookies.get(accounts.COOKIE, ""))
+    except Exception:
+        return JSONResponse({"detail": "Account storage is temporarily unavailable."}, status_code=503)
+    request.state.student = student
+    request.state.browser_workspace = hashlib.sha256(cookie.encode()).hexdigest()
+    ctx = security.workspace.set(student["workspace"] if student else hashlib.sha256(cookie.encode()).hexdigest())
     try:
         if request.method != "OPTIONS" and any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES):
-            if security.public_deployment() and len(security.access_pin() or "") < 16:
+            if accounts.enabled() and not accounts.configured():
+                return JSONResponse({"detail": "Student account sign-in must be configured."}, status_code=503)
+            if not accounts.enabled() and not student and not path.startswith("/api/account") and security.public_deployment() and len(security.access_pin() or "") < 16:
                 return JSONResponse({"detail": "Configure a deployment access secret of at least 16 characters."}, status_code=503)
             try:
                 require_access_pin(request)
@@ -136,8 +153,8 @@ async def access_pin_middleware(request: Request, call_next):
 
 
 @app.get("/api/workspace")
-def current_workspace():
-    return {"workspace_id": security.workspace.get(), "storage": "browser-bound; clearing cookies removes access"}
+def current_workspace(request: Request):
+    return {"workspace_id": security.workspace.get(), "storage": "student account" if request.state.student else "browser-bound; clearing cookies removes access"}
 
 
 class UploadPermit(BaseModel):
@@ -218,7 +235,7 @@ def home():
 
 
 @app.get("/api/health")
-def health():
+def health(request: Request):
     """Lightweight check used to confirm the serverless function boots."""
     info = store.storage_info()
     try:
@@ -244,6 +261,9 @@ def health():
             else "public"
         ),
         "auth_required": security.auth_required(),
+        "accounts_configured": accounts.configured(),
+        "accounts_required": accounts.enabled(),
+        "signed_in": bool(getattr(request.state, "student", None)),
         "upload_hint": (
             "Use Vercel Blob client upload for files over ~4 MB on Vercel. "
             "Scanned PDFs need ANTHROPIC_API_KEY for OCR after upload."

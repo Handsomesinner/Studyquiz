@@ -5,9 +5,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 
-async function request({pin='secret', configured=true, access='private', permitStatus=200, pathname=`uploads/${'a'.repeat(32)}-lecture.pdf`, type='blob.generate-client-token', method='POST', realSdk=false}={}) {
+async function request({pin='secret', configured=true, access='private', permitStatus=200, pathname=`uploads/${'a'.repeat(32)}-lecture.pdf`, type='blob.generate-client-token', method='POST', realSdk=false, accounts=false, cookie='sq_workspace=browser-token'}={}) {
   let issued=false, sdkCalls=0, permitCalls=0, forwarded;
   const process = {env: {STUDYQUIZ_ACCESS_PIN: configured ? 'secret' : '', BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_owned_synthetic' , BLOB_ACCESS: access, VERCEL_URL: 'studyquiz.example'}};
+  if (accounts) Object.assign(process.env,{STUDYQUIZ_AUTH_MODE:'accounts',STUDYQUIZ_AUTH_URL:'https://synthetic.supabase.co',STUDYQUIZ_AUTH_PUBLIC_KEY:'synthetic'});
   const sandbox = {module: {exports: {}}, process, Buffer, Date, AbortSignal,
     require(name) {
       if(name==='node:crypto') return crypto;
@@ -26,7 +27,7 @@ async function request({pin='secret', configured=true, access='private', permitS
   };
   vm.runInNewContext(fs.readFileSync('api/blob-upload.js','utf8'), sandbox);
   const response={headers:{},setHeader(k,v){this.headers[k]=v}, status(n){this.statusCode=n;return this},json(body){this.body=body;return this}};
-  await sandbox.module.exports({method,url:'/api/blob/upload',headers:{'x-studyquiz-pin':pin,cookie:'sq_workspace=browser-token'},body:{type,payload:{pathname,clientPayload:null,multipart:false}}},response);
+  await sandbox.module.exports({method,url:'/api/blob/upload',headers:{'x-studyquiz-pin':pin,cookie},body:{type,payload:{pathname,clientPayload:null,multipart:false}}},response);
   return {response,issued,sdkCalls,permitCalls,forwarded};
 }
 
@@ -43,3 +44,14 @@ test('unsigned completion callback is rejected by SDK boundary',async()=>{const 
 // SDK cryptography runs locally using a synthetic token; only the permit call is mocked.
 test('installed SDK signs a private limited grant without real storage calls',async()=>{const r=await request({realSdk:true});assert.equal(r.response.statusCode,200);assert.equal(r.response.body.access,'private');assert.match(r.response.body.clientToken,/^vercel_blob_client_/);assert.equal(r.permitCalls,1)});
 test('installed SDK rejects an unsigned completion callback',async()=>{const r=await request({realSdk:true,pin:'',type:'blob.upload-completed'});assert.equal(r.response.statusCode,400)});
+
+test('accounts mode rejects the old PIN and verifies student cookies through the permit endpoint',async()=>{
+  const denied=await request({accounts:true});assert.equal(denied.response.statusCode,401);
+  const cookie='sq_student='+'a'.repeat(43);
+  const forged=await request({accounts:true,cookie,pin:'',permitStatus:401});
+  assert.equal(forged.issued,false);assert.equal(forged.response.statusCode,400);
+  assert.equal(forged.forwarded.opts.headers['x-studyquiz-pin'],'');
+  assert.equal(forged.forwarded.opts.headers.cookie,cookie);
+  const accepted=await request({accounts:true,cookie,pin:''});
+  assert.equal(accepted.issued,true);assert.equal(accepted.response.statusCode,200);
+});

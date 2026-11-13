@@ -47,6 +47,19 @@ test('blank code does not send a request',async()=>{
   assert.equal(s.requests(),0);assert.equal(s.stored.size,0);
 });
 
+test('signed-in students do not need the shared workspace code',()=>{
+  const s=setup();s.context.window.__sqSignedIn=true;
+  assert.equal(vm.runInContext('ensureAccessPinInteractive()',s.context),'');
+  assert.equal(s.element('access-card').hidden,true);
+});
+test('account-only mode directs guests to student sign-in',()=>{
+  const s=setup();s.context.window.__sqAccountsRequired=true;
+  assert.throws(()=>vm.runInContext('ensureAccessPinInteractive()',s.context),/student account/);
+  assert.equal(s.element('student-signin').hidden,false);
+  assert.equal(s.element('student-email').focused,true);
+  assert.equal(s.element('access-card').hidden,true);
+});
+
 test('connection timeout clears the secret and restores the unlock button',async()=>{
   const s=setup();s.element('access-code').value='synthetic-valid-code';
   s.context.fetch=async(_url,options)=>{
