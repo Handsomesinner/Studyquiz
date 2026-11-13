@@ -1305,9 +1305,8 @@ function xhrPutToBlob(file, { pathname, contentType, clientToken, access, status
     xhr.open("PUT", putUrl);
     xhr.setRequestHeader("authorization", `Bearer ${clientToken}`);
     xhr.setRequestHeader("x-api-version", "13");
-    xhr.setRequestHeader("x-add-random-suffix", "0");
-    xhr.setRequestHeader("x-allow-overwrite", "0");
-    xhr.setRequestHeader("x-cache-control-max-age", "60");
+    // These policies are signed into the server-issued client token. Sending
+    // server-only policy headers here makes Blob's browser preflight fail.
     xhr.setRequestHeader("x-vercel-blob-access", access);
     xhr.setRequestHeader("x-content-type", contentType);
     xhr.setRequestHeader("x-content-length", String(file.size));
