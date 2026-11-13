@@ -18,7 +18,7 @@
     --paper-2: #e8eef5;
     --card: #ffffff;
     --accent: #0f766e;
-    --accent-2: #0d9488;
+    --accent-2: #0f766e;
     --accent-hover: #0d5c56;
     --accent-soft: #ccfbf1;
     --accent-glow: rgba(15, 118, 110, 0.18);
@@ -187,7 +187,7 @@
     display: block; font-size: 0.8rem; color: var(--muted); font-weight: 600;
     margin: 0.75rem 0 0.3rem; letter-spacing: 0.01em;
   }
-  input[type="text"], input[type="number"], select {
+  input[type="text"], input[type="number"], input[type="password"], select {
     width: 100%; padding: 0.65rem 0.75rem; border: 1px solid var(--line);
     border-radius: var(--radius-sm); font-size: 0.95rem; font-family: var(--font);
     background: var(--paper); color: var(--ink);
@@ -431,6 +431,51 @@
   .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.35rem; }
   .hidden { display: none !important; }
 
+  /* Keyboard access and readable, touch-friendly layouts. */
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+  .dropzone:focus-within { outline: 3px solid var(--accent); outline-offset: 4px; }
+  .skip-link { position: absolute; left: 1rem; top: 0; transform: translateY(-150%); z-index: 10;
+    padding: .75rem 1rem; background: var(--card); color: var(--ink); border: 2px solid var(--accent); }
+  .skip-link:focus { transform: translateY(0); }
+  button, a.button-link, select { min-height: 44px; }
+  .icon-btn { min-width: 44px; width: 44px; height: 44px; flex-shrink: 0; }
+  .row > div, .progress-wrap, .exam-part .part-text { min-width: 0; }
+  .question, .answer-card, .exam-sheet, .status, #file-name, .metrics { overflow-wrap: anywhere; }
+  .question p.q { line-height: 1.65; }
+  .option { min-height: 48px; line-height: 1.6; }
+  .option input { flex-shrink: 0; width: 1.1rem; height: 1.1rem; }
+  .option-text { flex: 1; min-width: 0; }
+  .option:has(input:focus-visible) { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .option:has(input:checked)::after { content: "Selected"; font-size: .75rem; margin-left: auto; align-self: center; }
+  .option.correct::after { content: "Correct answer"; }
+  .option.wrong::after { content: "Your answer — incorrect"; }
+  [data-theme="dark"] button.primary,
+  [data-theme="dark"] #upload-btn, [data-theme="dark"] #generate-btn,
+  [data-theme="dark"] #submit-btn, [data-theme="dark"] #gen-answers-btn,
+  [data-theme="dark"] #answer-notes-btn, [data-theme="dark"] .mode-switch button.active { color: #042f2e; }
+  @media (max-width: 540px) {
+    .shell { padding: 0 .75rem calc(2rem + env(safe-area-inset-bottom)); }
+    .card { padding: 1rem; }
+    .hero { padding: 1rem 0; }
+    .row { flex-direction: column; }
+    .row > div { width: 100%; }
+    input[type="text"], input[type="number"], input[type="password"], select, textarea,
+    textarea#questions-text, .exam-write { font-size: 16px; }
+    .btn-row > button, .btn-row > a, .actions > button, .actions > a { flex: 1 1 100%; justify-content: center; }
+    .question { padding: .9rem; }
+    .option { flex-wrap: wrap; padding: .8rem .65rem; }
+    .option::after { flex-basis: 100%; padding-left: 1.65rem; }
+    .exam-sheet { padding: 1rem .75rem; }
+    .exam-part .part-head { flex-wrap: wrap; }
+    .exam-part .part-text { flex-basis: 100%; }
+    .exam-sub { margin-left: .65rem; }
+    body { background-attachment: scroll; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto !important; }
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
+
   /* Exam paper */
   .exam-sheet {
     background: #fffcf5; border: 1px solid #e7dfcf; padding: 1.6rem 1.35rem 2rem;
@@ -548,6 +593,7 @@
 </style>
 </head>
 <body>
+<a class="skip-link no-print" href="#main-content">Skip to study workspace</a>
 <div class="shell">
   <div class="topbar no-print">
     <a class="brand" href="/">
@@ -585,7 +631,7 @@
       aria-selected="false" aria-controls="setup-panel" tabindex="-1">My questions</button>
   </div>
 
-<main>
+<main id="main-content" tabindex="-1">
   <section class="card hidden no-print" id="access-card" aria-labelledby="access-heading">
     <h2 id="access-heading">Unlock your workspace</h2>
     <p class="hint">Enter the access code set by the project owner. It stays in this browser tab only.</p>
@@ -606,12 +652,12 @@
       </div>
     </div>
     <div class="dropzone" id="drop-zone">
-      <input type="file" id="file" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
+      <input type="file" id="file" aria-label="Choose your study notes" aria-describedby="file-types" accept=".pdf,.docx,.pptx,.txt,.md,.doc" />
       <div class="dropzone-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2"/></svg>
       </div>
       <strong>Drop a file here, or click to browse</strong>
-      <span>PDF, Word, PowerPoint, or text</span>
+      <span id="file-types">PDF, Word, PowerPoint, or text</span>
       <div id="file-name"></div>
     </div>
     <div class="btn-row">
@@ -797,7 +843,7 @@ Or paste any past-question list…"></textarea>
   </section>
 
   <section class="card hidden" id="result-card">
-    <div class="scoreband" id="scoreband"></div>
+    <div class="scoreband" id="scoreband" role="status" aria-live="polite"></div>
     <div class="metrics hidden" id="result-grounding"></div>
     <div class="actions no-print">
       <button class="secondary" id="again-btn">Practice again</button>
@@ -2079,12 +2125,17 @@ function renderQuiz(questions) {
     const div = document.createElement("div");
     div.className = "question";
     div.dataset.index = qi;
+    div.setAttribute("role", "radiogroup");
+    div.setAttribute("aria-labelledby", `q-meta-${qi} q-text-${qi}`);
+    div.tabIndex = -1;
     const meta = document.createElement("div");
     meta.className = "q-meta";
+    meta.id = `q-meta-${qi}`;
     meta.textContent = `Question ${qi + 1} of ${questions.length}`;
     div.appendChild(meta);
     const p = document.createElement("p");
     p.className = "q";
+    p.id = `q-text-${qi}`;
     p.textContent = q.question;
     div.appendChild(p);
     q.options.forEach((opt, oi) => {
@@ -2098,7 +2149,10 @@ function renderQuiz(questions) {
         updateProgress();
       });
       label.appendChild(radio);
-      label.appendChild(document.createTextNode(opt));
+      const optionText = document.createElement("span");
+      optionText.className = "option-text";
+      optionText.textContent = opt;
+      label.appendChild(optionText);
       div.appendChild(label);
     });
     holder.appendChild(div);
@@ -2280,7 +2334,10 @@ async function submitQuiz({ force = false, auto = false } = {}) {
       div.classList.toggle("unanswered-highlight", answers[i] < 0);
     });
     const first = document.querySelector(".question.unanswered-highlight");
-    if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (first) {
+      first.scrollIntoView({ behavior: "smooth", block: "center" });
+      first.querySelector("input[type=radio]")?.focus({preventScroll: true});
+    }
     $("submit-btn").textContent = "Submit anyway";
     $("submit-btn").onclick = () => submitQuiz({ force: true });
     return;
