@@ -1346,6 +1346,7 @@ async function refreshDocumentList(selectId) {
     });
     if (prev) sel.value = prev;
     $("previous-docs").classList.toggle("hidden", docs.length === 0);
+    if (window.__sqSignedIn) await refreshStudentDashboard();
   } catch (_) { /* ignore */ }
 }
 
@@ -2518,6 +2519,7 @@ async function submitQuiz({ force = false, auto = false } = {}) {
     });
     stopTimer();
     showResults(result);
+    if (window.__sqSignedIn) await refreshStudentDashboard();
   } catch (e) {
     alert(e.message);
     $("submit-btn").disabled = false;
