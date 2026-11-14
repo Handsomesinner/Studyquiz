@@ -1116,7 +1116,12 @@ async function accountRequest(path, body) {
   const response = await fetch('/api/account' + path, {method: body === undefined ? 'GET' : 'POST',
     headers: {'Content-Type':'application/json'}, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25000)});
   const data = await response.json().catch(()=>({}));
-  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not complete sign-in. Please try again.');
+  if (!response.ok) {
+    const error = new Error(typeof data.detail === 'string' ? data.detail : 'Could not complete sign-in. Please try again.');
+    const retry = Number(response.headers.get('Retry-After'));
+    if (response.status === 429 && Number.isFinite(retry) && retry > 0) error.retryAfter = Math.min(retry, 3600);
+    throw error;
+  }
   return data;
 }
 
@@ -1186,13 +1191,32 @@ async function refreshStudentDashboard() {
   } catch(error) { $('dashboard-status').textContent=error.message; }
 }
 
+let emailRetryTimer;
+function waitForEmailRetry(seconds) {
+  clearInterval(emailRetryTimer);
+  const until = Date.now() + seconds * 1000;
+  const button = $('send-email-code');
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    button.disabled = left > 0;
+    button.textContent = left ? `Try again in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'Email me a sign-in code';
+    if (!left) { clearInterval(emailRetryTimer); emailRetryTimer = null; }
+  };
+  tick(); emailRetryTimer = setInterval(tick, 1000);
+}
 $('email-signin-form').onsubmit=async(event)=>{
-  event.preventDefault();$('send-email-code').disabled=true;
+  event.preventDefault();
+  if ($('send-email-code').disabled) return;
+  $('send-email-code').disabled=true;
   try {
     const data=await accountRequest('/send-code',{email:$('student-email').value.trim()});
     $('student-status').textContent=data.message;$('email-verify-form').classList.remove('hidden');$('student-code').focus();
-  } catch(error) { $('student-status').textContent=error.message; }
-  finally { $('send-email-code').disabled=false; }
+    waitForEmailRetry(60);
+  } catch(error) {
+    $('student-status').textContent=error.message;
+    if (error.retryAfter) waitForEmailRetry(error.retryAfter);
+  }
+  finally { if (!emailRetryTimer) $('send-email-code').disabled=false; }
 };
 $('email-verify-form').onsubmit=async(event)=>{
   event.preventDefault();$('verify-email-code').disabled=true;

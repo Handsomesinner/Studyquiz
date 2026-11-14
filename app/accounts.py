@@ -6,6 +6,7 @@ browser or stored here; StudyQuiz issues its own bounded opaque session.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import secrets
@@ -57,7 +58,7 @@ def provider(path: str, payload: dict | None = None, *, token: str | None = None
                 auth_url().rstrip("/") + "/auth/v1/" + path,
                 headers=headers, json=payload)
         if response.status_code == 429:
-            raise HTTPException(429, "Please wait before trying sign-in again.")
+            raise HTTPException(429, "The email provider is temporarily limiting code requests. Please wait before requesting another code.", headers={"Retry-After": response.headers.get("Retry-After", "60") if response.headers.get("Retry-After", "60").isdigit() else "60"})
         if response.status_code >= 500 or response.status_code in (401, 403):
             raise HTTPException(503, "Email sign-in is temporarily unavailable.")
         if not response.is_success:
@@ -80,17 +81,38 @@ def resolve_session(raw: str) -> dict | None:
 
 
 def limit(request: Request, email: str, purpose: str):
-    hour = int(time.time()) // 3600
-    # Global budget remains effective even when a caller spoofs an IP header.
-    address = request.client.host if request.client else "unknown"
+    now = int(time.time())
+    hour = now // 3600
+    retry = (hour + 1) * 3600 - now
+    minutes = (retry + 59) // 60
+    # Only Vercel's overwritten proxy headers are trusted in its deployment.
+    # Never merge all visitors into the function's private/loopback peer IP.
+    address = request.client.host if request.client else ""
     if os.getenv("VERCEL"):
-        address = request.headers.get("x-vercel-forwarded-for", address).split(",")[0].strip()
+        address = (request.headers.get("x-vercel-forwarded-for")
+                   or request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                address = ""
+        except ValueError:
+            address = ""
     hashed = lambda value: hashlib.sha256(value.encode()).hexdigest()
-    for bucket, maximum in ((f"account:{purpose}:email:{hashed(email)}:{hour}", 4 if purpose == "send" else 12),
-                            (f"account:{purpose}:ip:{hashed(address)}:{hour}", 15 if purpose == "send" else 40),
-                            (f"account:{purpose}:global:{hour}", 100 if purpose == "send" else 500)):
+    action = "code requests" if purpose == "send" else "code verification attempts"
+    buckets = [("global", f"account:{purpose}:global:{hour}", 100 if purpose == "send" else 500)]
+    if address:
+        buckets.append(("network", f"account:{purpose}:ip:{hashed(address)}:{hour}", 15 if purpose == "send" else 40))
+    # Broad checks come first: rejected shared-network requests must not consume
+    # a student's personal allowance. Limits remain durable across instances.
+    buckets.append(("email", f"account:{purpose}:email:{hashed(email)}:{hour}", 4 if purpose == "send" else 12))
+    for scope, bucket, maximum in buckets:
         if not store.consume_budget(bucket, maximum):
-            raise HTTPException(429, "Too many sign-in attempts. Please try again later.")
+            reason = {
+                "email": f"This email has reached the hourly limit of {maximum} {action} (including earlier requests).",
+                "network": "This network has reached the hourly sign-in limit. Other people on the same network may also contribute.",
+                "global": "Email sign-in is busy and has reached its hourly safety limit.",
+            }[scope]
+            raise HTTPException(429, f"{reason} Try again in {minutes} minute(s).",
+                                headers={"Retry-After": str(retry)})
 
 
 class EmailBody(BaseModel):

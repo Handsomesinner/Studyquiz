@@ -161,3 +161,45 @@ def test_browser_import_is_explicit_and_cannot_claim_another_browser(account_env
     assert old.post('/api/account/import-browser-notes',json={'previous_code':'legacy-code-that-must-not-bypass'}).status_code==200
     assert [d['id'] for d in old.get('/api/documents').json()]==[mine]
     assert [d['id'] for d in other.get('/api/documents').json()]==[theirs]
+
+
+def test_email_limit_reports_retry_and_does_not_count_verification_as_sends(account_env,monkeypatch):
+    monkeypatch.setattr(accounts.time,'time',lambda: 7201)
+    c=TestClient(main.app)
+    for _ in range(3):
+        assert c.post('/api/account/send-code',json={'email':'alice@example.test'}).status_code==200
+    sign_in(c)
+    assert c.post('/api/account/send-code',json={'email':'alice@example.test'}).status_code==200
+    blocked=c.post('/api/account/send-code',json={'email':'alice@example.test'})
+    assert blocked.status_code==429
+    assert blocked.headers['retry-after']=='3599'
+    assert '4 code requests' in blocked.json()['detail']
+
+
+def test_vercel_does_not_share_internal_proxy_ip_bucket(account_env,monkeypatch):
+    monkeypatch.setenv('VERCEL','1')
+    seen=[]
+    monkeypatch.setattr(store,'consume_budget',lambda bucket,maximum: seen.append(bucket) or True)
+    request=__import__('starlette.requests',fromlist=['Request']).Request(
+        {'type':'http','headers':[], 'client':('127.0.0.1',1234)})
+    accounts.limit(request,'alice@example.test','send')
+    assert not any(':ip:' in bucket for bucket in seen)
+    seen.clear()
+    request=__import__('starlette.requests',fromlist=['Request']).Request(
+        {'type':'http','headers':[(b'x-forwarded-for',b'8.8.8.8')], 'client':('127.0.0.1',1234)})
+    accounts.limit(request,'alice@example.test','send')
+    assert any(':ip:' in bucket for bucket in seen)
+
+
+def test_network_block_does_not_use_email_allowance(account_env,monkeypatch):
+    seen=[]
+    def budget(bucket,maximum):
+        seen.append(bucket)
+        return ':ip:' not in bucket
+    monkeypatch.setattr(store,'consume_budget',budget)
+    request=__import__('starlette.requests',fromlist=['Request']).Request(
+        {'type':'http','headers':[], 'client':('8.8.8.8',1234)})
+    with pytest.raises(HTTPException) as blocked:
+        accounts.limit(request,'alice@example.test','send')
+    assert 'network' in blocked.value.detail
+    assert not any(':email:' in bucket for bucket in seen)
